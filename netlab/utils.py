@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from typing import Any, Coroutine, Deque, TypeAlias
 import logging
 
+log = logging.getLogger("netlab.utils")
+
 class BGTasksMixin:
     
     # This is designed to break to force override
@@ -252,9 +254,9 @@ def async_cache_result(func):
                 result = pickle.load(f)
         else:
             if os.path.isfile(cache_file):
-                print(f"Cache expired: {cache_file}")
+                log.debug(f"Cache expired: {cache_file}")
             else:
-                print(f"Cache Miss: {cache_file}")
+                log.debug(f"Cache Miss: {cache_file}")
             result = await func(*args, **kwargs)
             with open(cache_file, "wb") as f:
                 pickle.dump(result, f)
@@ -277,9 +279,9 @@ def sync_cache_result(func):
                 result = pickle.load(f)
         else:
             if os.path.isfile(cache_file):
-                print(f"Cache expired: {cache_file}")
+                log.debug(f"Cache expired: {cache_file}")
             else:
-                print(f"Cache Miss: {cache_file}")
+                log.debug(f"Cache Miss: {cache_file}")
             result = func(*args, **kwargs)
             with open(cache_file, "wb") as f:
                 pickle.dump(result, f)
