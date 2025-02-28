@@ -1,0 +1,5 @@
+*.pid
+leases
+venv
+__pycache__
+.env

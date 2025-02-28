@@ -1,0 +1,25 @@
+[project]
+name = "netlab"
+version = "0.2.0"
+description = "Network and Wifi Tools"
+authors = [
+    {name = "Will Sheppard"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles (>=24.1.0,<25.0.0)",
+    "certifi (>=2025.1.31,<2026.0.0)",
+    "charset-normalizer (>=3.4.1,<4.0.0)",
+    "idna (>=3.10,<4.0)",
+    "pyudev (>=0.24.3,<0.25.0)",
+    "urllib3 (>=2.3.0,<3.0.0)",
+    "pyroute2 (>=0.8.1,<0.9.0)",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+
