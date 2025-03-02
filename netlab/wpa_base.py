@@ -1,22 +1,18 @@
-import os
-import socket
 import asyncio
-import contextlib
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional, TypeAlias
+import asyncio
 import logging
-from netlab.utils import BGTasksMixin
+import os
 from pathlib import Path
+import socket
+from typing import Optional, Tuple
+from typing import Optional
 import weakref
+
+from netlab.utils import BGTasksMixin
 
 from .utils import EventQ, EventRecord
 
 log = logging.getLogger("BaseSocket")
-
-import asyncio
-from typing import Optional
-
 
 
 class WpaBaseSocket(BGTasksMixin):
@@ -50,7 +46,7 @@ class WpaBaseSocket(BGTasksMixin):
             log.warning(f"WPA Socket {self.path} doesn't exist yet.. waiting..>")
             await asyncio.sleep(2)
         else:
-            raise RuntimeError("Socket never appeared")
+            raise RuntimeError(f"Socket {self.path} never appeared")
 
         try:
             self.sock.bind(self.local_path)
@@ -63,7 +59,7 @@ class WpaBaseSocket(BGTasksMixin):
         log.debug(f"Connected sockets!: {self.local_path} {self.path}")
 
     async def _read_loop(self):
-        while True:
+        while self.sock:
             try:
                 data = await self.loop.sock_recv(self.sock, 4096)
                 if not data:
@@ -139,7 +135,7 @@ class WpaCtrl:
         self._event_task = asyncio.create_task(self._broadcast_events())
 
     async def _broadcast_events(self):
-        while True:
+        while self.event_sock:
             try:
                 data: bytes = await self.event_sock.queue.get()
                 log.debug(f"Event: {data}")
@@ -155,37 +151,35 @@ class WpaCtrl:
         log.warning(f"DUMP-Q: {ref}")
         self._subscribers.remove(ref)
 
-    async def subscribe_events(self) -> EventQ:
-        """
-        Creates a new subscriber queue and starts the event listener if needed.
-        """
+    async def subscribe_events(self) -> Tuple[asyncio.Queue, weakref.ref]:
+        """Creates a new subscriber queue and starts the event listener if needed."""
         await self._start_event_listener()
         q = asyncio.Queue()
-        q_ref = weakref.ref(q , self._dump_q )
+        q_ref = weakref.ref(q, self._dump_q)
         self._subscribers.append(q_ref)
-        return q
+        return q, q_ref
 
     class EventSubscription:
-        """
-        ctm for the event queue object cleanup
-        """
+        """Context manager for event queue cleanup."""
         def __init__(self, event_manager):
             self.event_manager = event_manager
             self.queue = None
+            self.queue_ref = None
 
         async def __aenter__(self):
-            self.queue = await self.event_manager.subscribe_events()
+            self.queue, self.queue_ref = await self.event_manager.subscribe_events()
             return self.queue
 
         async def __aexit__(self, exc_type, exc, tb):
-            if self.queue:
-                self.event_manager._subscribers.remove(weakref.ref(self.queue))
-                self.queue = None
+            if self.queue_ref in self.event_manager._subscribers:
+                self.event_manager._subscribers.remove(self.queue_ref)
+            self.queue = None
+            self.queue_ref = None
             return True
 
     def event_subscription(self):
         return self.EventSubscription(self)
-
+    
     async def _wait_for_event(self, pattern: str) -> Optional[EventRecord]:
         async with self.event_subscription() as sub_q:
             while True:

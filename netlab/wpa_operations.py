@@ -4,10 +4,15 @@ from typing import Optional
 
 import logging
 
+from netlab.utils import EventRecord
+
 from .atm import AsyncTaskManager
 from .dhcpman import DHCPManager
 from .netutils import NetworkUtilities
 from .wpa_base import WpaCtrl
+import re
+import datetime
+from dataclasses import dataclass, field
 
 log = logging.getLogger("WpaOperations")
 
@@ -25,6 +30,87 @@ class NetworkConfig:
     ssid: str
     psk: Optional[str] = None
     bssid: Optional[str] = None
+
+WPA_DISCONNECT_REASONS = {
+    0: "Unspecified reason",
+    1: "Previous authentication no longer valid",
+    2: "Deauthenticated due to inactivity",
+    3: "Deauthenticated because AP is unable to handle all stations",
+    4: "Class 2 frame received from non-authenticated station",
+    5: "Class 3 frame received from non-associated station",
+    6: "Station has left the BSS",
+    7: "Station requesting (re)association is not authenticated",
+    8: "Disassociated due to inactivity",
+    9: "Disassociated because AP is unable to handle all stations",
+    10: "Class 2 frame received from non-authenticated station",
+    11: "Class 3 frame received from non-associated station",
+    12: "Disassociated, leaving due to excessive retries",
+    13: "Disassociated, reason unspecified",
+    14: "Disassociated due to missing PMKSA cache entry",
+    15: "Disassociated due to 4-way handshake timeout",
+    16: "Disassociated due to invalid group cipher",
+    17: "Disassociated due to authentication timeout",
+    18: "Disassociated due to reason outside the standard list",
+    34: "Disassociated because AP requested reassociation",
+    35: "Disassociated due to network congestion",
+    36: "Disassociated due to security policy violation",
+    37: "Disassociated due to protocol timeout",
+    39: "Disassociated due to regulatory reasons",
+    43: "Disassociated due to excessive retries in reassociation",
+    45: "Disassociated due to AP handoff",
+}
+
+@dataclass
+class WpaEventRecord(EventRecord):
+    event_type: str|None = None
+    details: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        self._parse_data()
+
+    @classmethod
+    def from_event_record(cls, record: EventRecord) -> "WpaEventRecord":
+        return cls(data=record.data, timestamp=record.timestamp)
+
+    def _parse_data(self):
+        event_patterns = [
+            ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
+            ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
+            ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+            ("ASSOCIATE", r"<3>Trying to associate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+            ("ASSOCIATED", r"<3>Associated with (?P<mac>[0-9a-fA-F:]+)"),
+            ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE status=(?P<status>\d+)"),
+            ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with (?P<mac>[0-9a-fA-F:]+) \[PTK=(?P<ptk>\w+) GTK=(?P<gtk>\w+)\]"),
+            ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+).*?\]"),
+            ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED reason=(?P<reason>\d+)"),
+            ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\" auth_failures=(?P<failures>\d+) duration=(?P<duration>\d+)"),
+            ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\""),
+            ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED (?:.*)"),
+            ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
+            ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
+            ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+            ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+            ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
+            ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH freq=(?P<freq>\d+) width=(?P<width>\d+)"),
+            ("ALARM", r"<3>CTRL-EVENT-ALARM (?P<message>.+)"),
+        ]
+
+        for etype, pattern in event_patterns:
+            match = re.search(pattern, self.data)
+            if match:
+                self.event_type = etype
+                self.details = match.groupdict()
+
+                # If it's a disconnection event, add reason description
+                if etype == "DISCONNECTED" and "reason" in self.details:
+                    reason_code = int(self.details["reason"])
+                    self.details["reason_desc"] = WPA_DISCONNECT_REASONS.get(reason_code, "Unknown reason")
+                break
+
+    def get_event(self):
+        """Returns the parsed event type and details."""
+        return self.event_type, self.details
+
 
 class WpaOperations:
     """
@@ -130,7 +216,7 @@ class WpaOperations:
 
 class WifiClient:
     """
-    The top-level class that should bring all the other bits together
+    The top-level class that manages a wifi interface inside a network namespace 
     """
     def __init__(self, interface, netns=None):
         self.interface = interface
@@ -206,12 +292,28 @@ class WifiClient:
         await self.disconnect()
         await self.flush()
 
+    async def _events_task(self):
+        async with self.ops.wpa_ctrl.event_subscription() as sub_q:
+            while True:
+                record: EventRecord = await sub_q.get()
+                # vanilla_record = EventRecord(
+                #     data="<3>SME: Trying to authenticate with 12:19:70:c3:9b:09 (SSID='ssid-bob-1' freq=5180 MHz)",
+                #     timestamp=datetime.datetime(2025, 2, 28, 15, 12, 22, 989768, tzinfo=datetime.timezone.utc)
+                # )
+                parsed = WpaEventRecord.from_event_record(record)
+                if parsed.event_type:
+                    log.info(f"{self.interface}: {parsed.event_type}: {parsed.details}")
+
     async def setup(self):
+        """
+        Start supplicant, operations and clear dhcp
+        """
         # The mac _probably_ won't change. So should be ok
         self.mac = await self.get_mac()
 
         await self.supplicant.start()
         await self.ops.start()
+        self.events_task = asyncio.create_task( self._events_task() )
         await self.full_release()
 
     @property
