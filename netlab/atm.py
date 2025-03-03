@@ -3,6 +3,7 @@ import aiofiles
 from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import gzip
 import json
 from typing import Optional
 
@@ -154,7 +155,6 @@ class AsyncTaskManager(BGTasksMixin):
         finally:
             await self.shutdown()
 
-
     async def _log_task(self):
         """
         NOTE: If the log_task cancels, we're cancelling and so we don't guarantee any logs
@@ -165,7 +165,7 @@ class AsyncTaskManager(BGTasksMixin):
         """
 
         await self._process_started.wait()
-    
+
         async def capture_stream(stream, source):
             """Capture a stream (stdout/stderr), store logs in a buffer, and write to a JSONL file if provided."""
             async for line in stream:
@@ -175,14 +175,20 @@ class AsyncTaskManager(BGTasksMixin):
                 self.log_buffer.append(timestamped_entry)
 
                 if self.log_file:
-                    async with aiofiles.open(self.log_file, 'a') as f:
-                        await f.write(timestamped_entry.to_json() + '\n')
+                    # Open the file asynchronously in append-binary mode
+                    async with aiofiles.open(self.log_file, 'ab') as f:
+                        # Compress the JSON line using gzip
+                        json_line = timestamped_entry.to_json() + '\n'
+                        compressed_data = gzip.compress(json_line.encode('utf-8'))
+                        # Write the compressed data to the file
+                        await f.write(compressed_data)
 
 
         await asyncio.gather(
             capture_stream(self.process.stdout, "stdout"),
             capture_stream(self.process.stderr, "stderr")
         )
+
 
     @property
     def is_running(self):
@@ -233,5 +239,8 @@ class AsyncTaskManager(BGTasksMixin):
         return list(self.log_buffer)[-line_count:]
 
     def get_str_logs(self):
+        """
+        Keep it simple and strip out the meta, just return a list of message strings.
+        """
         return list(log.message for log in self.log_buffer)
 
