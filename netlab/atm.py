@@ -1,8 +1,9 @@
 import asyncio
 import aiofiles
 from collections import deque
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
 from typing import Optional
 
 import logging
@@ -14,6 +15,13 @@ class LogEntry:
     timestamp: datetime
     message: str
     source: str  # 'stdout' or 'stderr'
+
+    def to_json(self) -> str:
+        """Convert LogEntry to a JSON string."""
+        data = asdict(self)
+        data["timestamp"] = self.timestamp.isoformat()  # Ensure datetime is JSON-compatible
+        return json.dumps(data)
+
 
 class AsyncTaskManager(BGTasksMixin):
     """
@@ -157,16 +165,19 @@ class AsyncTaskManager(BGTasksMixin):
         """
 
         await self._process_started.wait()
-            
+    
         async def capture_stream(stream, source):
+            """Capture a stream (stdout/stderr), store logs in a buffer, and write to a JSONL file if provided."""
             async for line in stream:
                 log_line = line.decode(errors="replace").strip()
-                timestamped_entry = LogEntry(timestamp=datetime.utcnow(),
-                                             message=log_line, source=source)
+                timestamped_entry = LogEntry(timestamp=datetime.now(timezone.utc), message=log_line, source=source)
+
                 self.log_buffer.append(timestamped_entry)
+
                 if self.log_file:
                     async with aiofiles.open(self.log_file, 'a') as f:
-                        await f.write(f"[{timestamped_entry.timestamp}] [{source}] {log_line}\n")
+                        await f.write(timestamped_entry.to_json() + '\n')
+
 
         await asyncio.gather(
             capture_stream(self.process.stdout, "stdout"),

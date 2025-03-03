@@ -14,6 +14,15 @@ import logging
 
 log = logging.getLogger("netlab.utils")
 
+@dataclass
+class EventRecord:
+    """Stores an event with a UTC-aware timestamp."""
+    data: Any
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+EventQ: TypeAlias = asyncio.Queue[EventRecord]
+EventDeq: TypeAlias = Deque[EventRecord]
+
 class BGTasksMixin:
     
     # This is designed to break to force override
@@ -81,14 +90,6 @@ class BGTasksMixin:
                 break
         return
 
-@dataclass
-class EventRecord:
-    """Stores an event with a UTC-aware timestamp."""
-    data: Any
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-EventQ: TypeAlias = asyncio.Queue[EventRecord]
-EventDeq: TypeAlias = Deque[EventRecord]
 
 class PythonBinaryChecker:
     """

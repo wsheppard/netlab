@@ -1,6 +1,7 @@
 import asyncio
+from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Deque, Optional, TypeAlias
 
 import logging
 
@@ -111,6 +112,7 @@ class WpaEventRecord(EventRecord):
         """Returns the parsed event type and details."""
         return self.event_type, self.details
 
+WpaEventDeq: TypeAlias = Deque[WpaEventRecord]
 
 class WpaOperations:
     """
@@ -237,7 +239,7 @@ class WifiClient:
         self.supplicant = AsyncTaskManager(
                 self.wpa_args,
                 netns=self.netns,
-                log_file=f"{self.interface}.log",
+                log_file=f"{self.interface}.log.jsonl",
                 check_time=3
                 )
 
@@ -251,6 +253,9 @@ class WifiClient:
 
         # Vendor Class ID from dhcp often this is None
         self.vci = None
+
+        # Keep a history of recent events
+        self.wpa_events = deque(maxlen=128)
 
         self._generate_wpa_supplicant_config()
 
@@ -301,8 +306,12 @@ class WifiClient:
                 #     timestamp=datetime.datetime(2025, 2, 28, 15, 12, 22, 989768, tzinfo=datetime.timezone.utc)
                 # )
                 parsed = WpaEventRecord.from_event_record(record)
+                self.wpa_events.append(parsed)
                 if parsed.event_type:
-                    log.info(f"{self.interface}: {parsed.event_type}: {parsed.details}")
+                    if "BSS_" not in parsed.event_type:
+                        log.info(f"{self.interface}: {parsed.event_type}: {parsed.details}")
+                # TODO: Track disconnections and such here - update the various status
+                # fields
 
     async def setup(self):
         """
