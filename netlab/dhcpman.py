@@ -43,6 +43,7 @@ class DHCPManager(BGTasksMixin):
         self._dhcptask = None 
         self._socktask = None
         self.bound_event = asyncio.Event()
+        self._msg_lock = asyncio.Lock()
         self.bgtasks = set()
         self.server = None
         self._quit = asyncio.Event()
@@ -119,18 +120,19 @@ if __name__ == "__main__":
         """
         This is where our events get to eventually
         """
-        if message["reason"] in ["BOUND", "REBOOT"]:
-            await self.net_utils.set_ip_address(self.interface, message["new_ip_address"], "24")
-            await self.net_utils.set_gateway(message["new_routers"])
-            self.bound_event.set()
-        elif message["reason"] in ["RELEASE", "EXPIRE"]:
-            await self.net_utils.flush_ip_address(message["interface"])
-            await self.net_utils.flush_routes(message["interface"])
-            self.bound_event.clear()
-        elif message["reason"] == "PREINIT":
-            await self.net_utils.flush_ip_address(message["interface"])
-            await self.net_utils.flush_routes(message["interface"])
-            self.bound_event.clear()
+        async with self._msg_lock:
+            if message["reason"] in ["BOUND", "REBOOT"]:
+                await self.net_utils.set_ip_address(self.interface, message["new_ip_address"], "24")
+                await self.net_utils.set_gateway(message["new_routers"])
+                self.bound_event.set()
+            elif message["reason"] in ["RELEASE", "EXPIRE"]:
+                await self.net_utils.flush_ip_address(message["interface"])
+                await self.net_utils.flush_routes(message["interface"])
+                self.bound_event.clear()
+            elif message["reason"] == "PREINIT":
+                await self.net_utils.flush_ip_address(message["interface"])
+                await self.net_utils.flush_routes(message["interface"])
+                self.bound_event.clear()
 
 
     async def _handle_dhcp_message(self, reader, writer):
@@ -140,21 +142,22 @@ if __name__ == "__main__":
                 if not data:
                     break
                 message = json.loads(data.decode())
-                self.log.debug(f"Received DHCP event: {message}")
+                self.log.info(f"Received DHCP event: {message}")
                 self.eventq.append(EventRecord(message))
                 try:
                     await self._process_message(message)
                 except NUError:
                     pass
+        except Exception:
+            self.log.exception("DHCP HANDLE EXCEPTION")
+        finally:
             # This is required otherwise it'll hold up..
             writer.close()
-        except:
-            self.log.exception("DHCP HANDLE EXCEPTION")
-
-            
 
     async def wait_for_bind(self):
+        self.log.warning("Wait for bind....")
         await self.bound_event.wait()
+        self.log.warning("Bound!")
 
     async def start_dhcp(self):
         self.bound_event.clear()

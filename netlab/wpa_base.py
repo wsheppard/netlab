@@ -21,10 +21,9 @@ class WpaBaseSocket(BGTasksMixin):
     """
     _counter = 0
 
-    def __init__(self, path=None, loop=None):
+    def __init__(self, path=None):
         WpaBaseSocket._counter += 1
         self.path = Path(path or "/run/wpa_supplicant/wlan0")
-        self.loop = loop or asyncio.get_event_loop()
         self.local_path = f"/tmp/wpa_ctrl_{os.getpid()}_{WpaBaseSocket._counter}"
         self.bgtasks = set()
         self.sock = None
@@ -39,6 +38,8 @@ class WpaBaseSocket(BGTasksMixin):
         self.sock.setblocking(False)
         log.debug(f"Connecting sockets: {self.local_path} {self.path}")
 
+        loop = asyncio.get_running_loop()
+
         # Check main socket exists - be nice.
         for _ in range(5):
             if self.path.exists():
@@ -50,7 +51,7 @@ class WpaBaseSocket(BGTasksMixin):
 
         try:
             self.sock.bind(self.local_path)
-            await self.loop.sock_connect(self.sock, str(self.path))
+            await loop.sock_connect(self.sock, str(self.path))
         except:
             self._cleanup()
             raise
@@ -59,9 +60,10 @@ class WpaBaseSocket(BGTasksMixin):
         log.debug(f"Connected sockets!: {self.local_path} {self.path}")
 
     async def _read_loop(self):
+        loop = asyncio.get_running_loop()
         while self.sock:
             try:
-                data = await self.loop.sock_recv(self.sock, 4096)
+                data = await loop.sock_recv(self.sock, 4096)
                 if not data:
                     break
                 await self.queue.put(data)
@@ -69,7 +71,8 @@ class WpaBaseSocket(BGTasksMixin):
                 break
 
     async def send_raw(self, data: bytes):
-        await self.loop.sock_sendall(self.sock, data)
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendall(self.sock, data)
 
     async def close(self):
         if not self._started:
@@ -88,13 +91,12 @@ class WpaCtrl:
     """
     WpaCtrl manages both control and event communication with wpa_supplicant.
     """
-    def __init__(self, interface, loop=None):
-        self.loop = loop or asyncio.get_event_loop()
+    def __init__(self, interface):
         self.interface = interface
 
         # Control socket
         path = f"/run/wpa_supplicant/{interface}"
-        self.ctrl_sock = WpaBaseSocket(path, loop=self.loop)
+        self.ctrl_sock = WpaBaseSocket(path)
 
         # Event socket (lazy init)
         self.event_sock: Optional[WpaBaseSocket] = None
@@ -126,8 +128,8 @@ class WpaCtrl:
         """
         if self.event_sock:
             return
-
-        self.event_sock = WpaBaseSocket(path=f"/run/wpa_supplicant/{self.interface}", loop=self.loop)
+        
+        self.event_sock = WpaBaseSocket(path=f"/run/wpa_supplicant/{self.interface}")
         await self.event_sock.start()
         await self.event_sock.send_raw(b"ATTACH")
 

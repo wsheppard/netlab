@@ -5,6 +5,7 @@ from typing import Deque, Optional, TypeAlias
 
 import logging
 
+from netlab import libwifi
 from netlab.utils import EventRecord
 
 from .atm import AsyncTaskManager
@@ -218,9 +219,13 @@ class WpaOperations:
 
 class WifiClient:
     """
-    The top-level class that manages a wifi interface inside a network namespace 
+    The top-level class that manages a wifi interface inside a network namespace
+
+    Specify the interface to work with.
+    Can also specify if that interface is inside a net-namespace.
+    Also you can specify the log_file name to record all supplicant debug output
     """
-    def __init__(self, interface, netns=None):
+    def __init__(self, interface, netns=None, log_file=None):
         self.interface = interface
         self.netns = netns if netns else interface
         self.config_path = f"/tmp/{self.interface}_wpasup.conf"
@@ -234,12 +239,15 @@ class WifiClient:
             "-c", self.config_path,
             "-d"
         ]
+               
+        # TODO: Should we always have a log, they can take up a lot of space
+        self.log_file = log_file or f"{self.interface}.log.jsonl"
 
         # This doesn't start it
         self.supplicant = AsyncTaskManager(
                 self.wpa_args,
                 netns=self.netns,
-                log_file=f"{self.interface}.log.jsonl",
+                log_file=self.log_file,
                 check_time=3
                 )
 
@@ -256,6 +264,7 @@ class WifiClient:
 
         # Keep a history of recent events
         self.wpa_events = deque(maxlen=128)
+
 
         self._generate_wpa_supplicant_config()
 
@@ -286,7 +295,7 @@ class WifiClient:
                 raise LostConnection(f"Disconnected on  {self}")
             await asyncio.sleep(5)
 
-    async def connect_and_dhcp(self,config: NetworkConfig):
+    async def connect_and_dhcp(self, config: NetworkConfig):
         await self.connect(config)
         await self.start_dhcp()
         await self.wait_for_bind()
@@ -313,10 +322,17 @@ class WifiClient:
                 # TODO: Track disconnections and such here - update the various status
                 # fields
 
+
+    async def wifii(self):
+        wifiis = await libwifi.WifiInterface.from_iwp(self.netns)
+        return next( wifii for wifii in wifiis 
+                    if wifii.interface == self.interface)
+
     async def setup(self):
         """
         Start supplicant, operations and clear dhcp
         """
+
         # The mac _probably_ won't change. So should be ok
         self.mac = await self.get_mac()
 

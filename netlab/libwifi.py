@@ -66,7 +66,7 @@ class WifiInterface(dict):
         return f'Wifii({self.interface}{nsfield})'
 
     @classmethod
-    async def from_iwp(cls, namespace=None):
+    async def from_iwp(cls, namespace=None) -> list["WifiInterface"]:
         """
         Return all interfaces using the nl80211 calls, specifing namespace
         """
@@ -96,6 +96,13 @@ class WifiInterface(dict):
     async def state(self):
         return await self.get_interface_state()
 
+    @property
+    def has5g(self):
+        return 5180 in self.get_freqs()
+
+    @property
+    def has2g(self):
+        return 2412 in self.get_freqs()
 
     async def summary(self):
         return { 
@@ -108,6 +115,13 @@ class WifiInterface(dict):
                '2g': 2412 in self.get_freqs(),
                #'freqs': ",".join( map(str,wifii['wiphy']['freqs']) )
                }
+
+    def disabled_freqs(self):
+        wiphy = self['wiphy']
+        freqs = wiphy['freqs']
+        freqs = ( freq for freq,fmeta in freqs.items() if fmeta.get("disabled") )
+        ret = list(map(int,freqs))
+        return ret
 
     def get_freqs(self):
         wiphy = self['wiphy']

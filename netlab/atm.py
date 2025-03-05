@@ -13,9 +13,13 @@ from netlab.utils import BGTasksMixin
 @dataclass
 class LogEntry:
     """Stores a log message with a timestamp and source."""
-    timestamp: datetime
     message: str
-    source: str  # 'stdout' or 'stderr'
+    source: str  
+    timestamp: Optional[datetime] = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
 
     def to_json(self) -> str:
         """Convert LogEntry to a JSON string."""
@@ -68,6 +72,8 @@ class AsyncTaskManager(BGTasksMixin):
         self.env = env
 
         self.process: Optional[asyncio.subprocess.Process] = None
+
+        self._log_q = asyncio.Queue()
         self.log_buffer = deque(maxlen=buffer_size)
 
         self._process_start = asyncio.Event()
@@ -75,10 +81,9 @@ class AsyncTaskManager(BGTasksMixin):
         self._process_stopped = asyncio.Event()
         self._process_done = asyncio.Event()
         self._return_code = None
-        self._log_tasko = None
 
     def __repr__(self):
-        return (f"ATM({self.args}, [{self.process}], "
+        return (f"ATM({self.args}, [NS-{self.netns}], "
                 f"running:{self.is_running}, rc:{self.return_code}, "
                 f"loglen:{len(self.log_buffer)} )")
 
@@ -97,11 +102,29 @@ class AsyncTaskManager(BGTasksMixin):
         if self._process_start.is_set():
             raise RuntimeError("Task is already running.")
         self._process_start.set()
-        self.bgadd( self._monitor_task(), "atm-monitor" )
-        self._log_tasko = self.bgadd( self._log_task(), "atm-log" )
+
+        # Task hierachy is the way forward - only complete the outer event when the task
+        # is actually done.
+        self.monitor = asyncio.create_task(self._monitor_task(), name=f"atm-monitor[{self}]" )
+        self.monitor.add_done_callback(self.mark_done)
+
+        self.bgadd( self._log_task(), f"atm-logi[{self}]" )
         await self._run()
         if self.check_time:
             await self.check_process_alive(self.check_time)
+
+    def mark_done(self,task):
+        # We have to do this last, as this should be about everything being complete
+        self._process_done.set()
+    
+    async def capture_stream(self, stream, source):
+        """
+        Capture a stream (stdout/stderr), store logs in a buffer, and write to a JSONL file if provided.
+        Can be summarily cancelled
+        """
+        async for line in stream:
+            log_line = line.decode(errors="replace").strip()
+            await self.simple_log(log_line, source)
 
     async def _run(self):
         cmd = self.args
@@ -127,7 +150,9 @@ class AsyncTaskManager(BGTasksMixin):
 
         if self.process is None:
             raise RuntimeError("Cannot start process!")
-
+            
+        self.bgadd(self.capture_stream(self.process.stdout, "stdout"))
+        self.bgadd(self.capture_stream(self.process.stderr, "stderr"))
         self._process_started.set()
 
         self.log.debug(f"Created Process: {self.process}")
@@ -144,50 +169,53 @@ class AsyncTaskManager(BGTasksMixin):
         """
         Monitor for exit of the underlying OR cancellation
         """
-        await self._process_started.wait()
         try:
+            await self.simple_log(f"ATM wait for start: {self}", source="atm")
+            await self._process_started.wait()
+            await self.simple_log(f"ATM started: {self}", source="atm")
             await self.process.wait()
         except asyncio.CancelledError:
             self.log.warning(f"Cancellation in ATM monitor: {self}")
         else:
             self._process_stopped.set()
+            await self.simple_log(f"ATM stopped: {self}", source="atm")
             self.log.debug(f"Process {self} has exited with return code: {self.return_code}")
         finally:
             await self.shutdown()
 
+    async def _write_to_log_file(self, entry: LogEntry):
+        if not self.log_file:
+            self.log.warning("Refuse to write to no file.")
+            return
+
+        async with aiofiles.open(self.log_file, 'ab') as f:
+            # Compress the JSON line using gzip
+            json_line = entry.to_json() + '\n'
+            compressed_data = gzip.compress(json_line.encode('utf-8'))
+            # Write the compressed data to the file
+            await f.write(compressed_data)
+
+    async def simple_log(self, message, source):
+        entry = LogEntry(timestamp=datetime.now(timezone.utc),
+                         message=message,
+                         source=source)
+        await self._log_q.put(entry)
+    
     async def _log_task(self):
-        """
-        NOTE: If the log_task cancels, we're cancelling and so we don't guarantee any logs
-        in any sane format.
-
-        However, the monitor_task MUST wait for the log_task to complete if it completes
-        properly because often the log pipes are fully buffered.
-        """
-
-        await self._process_started.wait()
-
-        async def capture_stream(stream, source):
-            """Capture a stream (stdout/stderr), store logs in a buffer, and write to a JSONL file if provided."""
-            async for line in stream:
-                log_line = line.decode(errors="replace").strip()
-                timestamped_entry = LogEntry(timestamp=datetime.now(timezone.utc), message=log_line, source=source)
-
-                self.log_buffer.append(timestamped_entry)
-
+        try:
+            while True:
+                le = await self._log_q.get()
+                self.log_buffer.append(le)
                 if self.log_file:
-                    # Open the file asynchronously in append-binary mode
-                    async with aiofiles.open(self.log_file, 'ab') as f:
-                        # Compress the JSON line using gzip
-                        json_line = timestamped_entry.to_json() + '\n'
-                        compressed_data = gzip.compress(json_line.encode('utf-8'))
-                        # Write the compressed data to the file
-                        await f.write(compressed_data)
-
-
-        await asyncio.gather(
-            capture_stream(self.process.stdout, "stdout"),
-            capture_stream(self.process.stderr, "stderr")
-        )
+                    await self._write_to_log_file(le)
+        except asyncio.CancelledError:
+            #drain logs from queue
+            while not self._log_q.empty():
+                self.log.debug(f"Drain: {self._log_q.qsize()}")
+                le = self._log_q.get_nowait()
+                self.log_buffer.append(le)
+                if self.log_file:
+                    await self._write_to_log_file(le)
 
 
     @property
@@ -195,11 +223,13 @@ class AsyncTaskManager(BGTasksMixin):
         return self._process_started.is_set() and not self._process_stopped.is_set()
 
     async def shutdown(self):
+        self.log.debug(f"Start shutdown... {self}")
         if self.process and self.is_running:
             try:
                 self.process.terminate()
                 for n in range(2):
                         try:
+                            self.log.debug(f"Waiting for process termination... {self}")
                             await asyncio.wait_for(self.process.wait(), timeout=self.stop_grace_period)
                         except asyncio.TimeoutError:
                             if n == 0:
@@ -213,11 +243,13 @@ class AsyncTaskManager(BGTasksMixin):
             except ProcessLookupError:
                 pass
 
-        # We _must_ wait for logs to finish otherwise they will be incomplete
-        # In normal shutdown, the streams should end when the managed process ends.
-        if self._log_tasko:
-            await self._log_tasko
-        self._process_done.set()
+        while not self._log_q.empty():
+            self.log.debug("Waiting for log queue to empty")
+            await asyncio.sleep(0.5)
+
+        await self.bgcancel_and_wait()
+
+        self.log.debug(f"Shutdown complete... {self}")
 
     async def check_process_alive(self, delay: int = 3):
         """Wait and verify if the process is still running, without interrupting wait."""
@@ -235,8 +267,11 @@ class AsyncTaskManager(BGTasksMixin):
         except asyncio.TimeoutError:
             self.log.info(f"Process {self.process} still running after {delay} seconds.")
 
-    def get_recent_logs(self, line_count: int = 100):
-        return list(self.log_buffer)[-line_count:]
+    def logsource(self,source="stdout"):
+        return ( log for log in self.log_buffer if log.source==source )
+
+    def get_recent_logs(self, line_count: int = 100, source="stdout"):
+        return list(self.logsource(source))[-line_count:]
 
     def get_str_logs(self):
         """

@@ -32,6 +32,7 @@ class NetworkUtilities:
         self.netns = netns
 
     async def _run_command(self, command: List[str]):
+        log.debug(f"[{self.netns}] {command}")
         task = await AsyncTaskManager(args=command, netns=self.netns)
         if task.return_code:
             #for loge in task.get_recent_logs(20):
@@ -163,6 +164,7 @@ class NetworkUtilities:
         if task.return_code:
             log.warning(f"IPA command failed - {args}")
             return None
+
         logs = task.get_recent_logs(1)
         if logs:
             return json.loads(logs[0].message)

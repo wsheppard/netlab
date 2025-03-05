@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Coroutine, Deque, TypeAlias
+from typing import Any, Awaitable, Coroutine, Deque, TypeAlias
 import logging
 
 log = logging.getLogger("netlab.utils")
@@ -38,13 +38,13 @@ class BGTasksMixin:
         except asyncio.CancelledError:
             # We're expecting cancellation here and as we're in the bgtasks callback
             # we can just absorb it.
-            log.debug(f"Completed with Cancellation")
+            log.debug(f"[{name}] Completed with Cancellation")
         except asyncio.TimeoutError:
             log.warning(f"Completed with Timeout")
         except Exception:
             log.exception(f"Completed with Exception")
         else:
-            log.debug(f"Completed without exception: [{result}]")
+            log.debug(f"[{name}] Completed without exception: [{result}]")
         finally:
             self.bgtasks.discard(task)
 
@@ -58,17 +58,36 @@ class BGTasksMixin:
         return tsk
 
     def bgcleanup(self):
-        """
-        Take care that the context of this call isn't one of the bgtasks!
-        That'll be problematic
-        """
         log = getattr(self, "log") or logging.getLogger("bgtasks")
-        log.debug("BGCLEANUP RUNNING")
         if not self.bgtasks:
             return
         for task in self.bgtasks:
-            log.warning(f"BgCleanup[{self}]: Cancelling Task\n{task}")
+            if task is asyncio.current_task():
+                log.debug(f"BgCleanup[{self}]: Skipping Current Task\n{task}")
+                continue
+            log.debug(f"BgCleanup[{self}]: Cancelling Task\n{task}")
             task.cancel()
+
+    async def bgcancel_and_wait(self):
+        """
+        Cancel all background tasks except the current one, then wait for them to finish.
+        This ensures that when a master task decides to cancel the rest, it properly waits
+        for cleanup before returning.
+        """
+        log = getattr(self, "log", None) or logging.getLogger("bgtasks")
+        current = asyncio.current_task()
+        tasks_to_cancel = {task for task in self.bgtasks if task is not current}
+        if not tasks_to_cancel:
+            log.debug("No tasks to cancel")
+            return
+
+        for task in tasks_to_cancel:
+            log.debug(f"bgcancel_and_wait: Cancelling task {task.get_name()}")
+            task.cancel()
+
+        # Wait for all cancelled tasks to finish, collecting exceptions.
+        return await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
 
     async def bgwait(self):
         log = getattr(self, "log", None) or logging.getLogger("bgtasks")
@@ -83,9 +102,12 @@ class BGTasksMixin:
                 log.debug(f"Tasks result: {comp}")
 
             if pend:
-                log.debug("Tasks still running after 5 seconds.")
+                this = asyncio.current_task()
+                thisname = this.get_name()
+                log.debug(f"Tasks still running after 5 seconds This: {thisname}")
                 for t in self.bgtasks:
-                    log.debug(t)
+                    name = t.get_name()
+                    log.debug(name)
             else:
                 break
         return
