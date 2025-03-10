@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Coroutine, Deque, TypeAlias
 import logging
+import weakref
 
 log = logging.getLogger("netlab.utils")
 
@@ -22,6 +23,39 @@ class EventRecord:
 
 EventQ: TypeAlias = asyncio.Queue[EventRecord]
 EventDeq: TypeAlias = Deque[EventRecord]
+
+class EventBus:
+    """
+    Really simple pub/sub that is missing from asyncio
+    It's using internal weakrefs, which just acts as a cleanup for clients that don't call
+    unsubscribe
+    """
+    def __init__(self):
+        self.queues = weakref.WeakSet()  # Automatically removes dead queues
+
+    def put(self, event):
+        """Non-blocking: Adds an event to all consumer queues."""
+        for queue in list(self.queues):  # Iterate over active consumers
+            queue.put_nowait(event)  # Each consumer gets the event
+
+    def subscribe(self):
+        """Creates a new per-consumer queue and tracks it weakly."""
+        queue = asyncio.Queue()
+        self.queues.add(queue)  # WeakRef ensures auto cleanup
+        return queue
+
+    def unsubscribe(self, queue):
+        """Removes a consumer queue explicitly if needed."""
+        self.queues.discard(queue)  # Safe removal, but not required due to WeakSet
+
+    async def __aenter__(self):
+        """Auto-subscribe in async context."""
+        self.queue = self.subscribe()
+        return self.queue
+
+    async def __aexit__(self, exc_type, exc, tb):
+        """Auto-unsubscribe when exiting context."""
+        self.unsubscribe(self.queue)
 
 class BGTasksMixin:
     

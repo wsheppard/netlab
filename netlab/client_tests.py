@@ -27,14 +27,14 @@ class WifiPingTester(BGTasksMixin):
 
             ping_info = {
                 "source": {
-                    "client": client1,
+                    "client": client1.dict(),
                     "interface": client1.interface,
                     "ip": ip1,
                     "mac": mac1['mac'],
                     "ap_mac": mac1['ap_mac']
                 },
                 "destination": {
-                    "client": client2,
+                    "client": client2.dict(),
                     "interface": client2.interface,
                     "ip": ip2,
                     "mac": mac2['mac'],
@@ -45,6 +45,8 @@ class WifiPingTester(BGTasksMixin):
                 }
 
             if ip1 and ip2:
+
+                # OK client 1 pings client 2
                 try:
                     internal = await client1.ping(client2)
                 except netutils.NUError:
@@ -53,6 +55,7 @@ class WifiPingTester(BGTasksMixin):
                     self.log.debug(f"PING OK:{client1} -> {client2}")
                     ping_info["internal"] = internal
 
+                # OK client 1 pings WAN
                 try:
                     external = await client1.ping("1.1.1.1")
                 except netutils.NUError:

@@ -182,13 +182,3 @@ class WpaCtrl:
     def event_subscription(self):
         return self.EventSubscription(self)
     
-    async def _wait_for_event(self, pattern: str) -> Optional[EventRecord]:
-        async with self.event_subscription() as sub_q:
-            while True:
-                record: EventRecord = await sub_q.get()
-                if pattern in record.data:
-                    return record
-
-    async def wait_for_event(self, pattern: str, timeout=30) -> Optional[EventRecord]:
-        return await asyncio.wait_for( self._wait_for_event(pattern), timeout )
-    

@@ -1,4 +1,4 @@
-from . import libwifi
+from netlab import libwifi
 import sys
 import asyncio
 

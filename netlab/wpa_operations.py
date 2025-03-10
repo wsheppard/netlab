@@ -1,12 +1,13 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Optional, TypeAlias
+from typing import Callable, Deque, Optional, TypeAlias
+import json
 
 import logging
 
 from netlab import libwifi
-from netlab.utils import EventRecord
+from netlab.utils import EventBus, EventRecord
 
 from .atm import AsyncTaskManager
 from .dhcpman import DHCPManager
@@ -125,13 +126,49 @@ class WpaOperations:
         self.interface = interface
         self.wpa_ctrl = WpaCtrl(interface)
         self.connected_network_id: Optional[int] = None
+        self.events_task = None
+        self.event_bus = EventBus()
+        # Keep a history of recent events
+        self.wpa_events:WpaEventDeq = deque(maxlen=128)
+    
+    async def _wait_for_event(self, matcher:Callable[[WpaEventRecord],bool]) -> Optional[WpaEventRecord]:
+        async with self.event_bus as sub_q:
+            while True:
+                record: WpaEventRecord = await sub_q.get()
+                if matcher(record):
+                    return record
+
+    async def wait_for_event(self, event: str, timeout=30) -> Optional[WpaEventRecord]:
+        # Simple event name matcher
+        def match_event(new_event:WpaEventRecord):
+            if new_event.event_type:
+                return event in new_event.event_type
+            return False
+
+        return await asyncio.wait_for( self._wait_for_event(match_event), timeout )
+    
+
+    async def _events_task(self):
+        """
+        Here we convert the raw event stream to our json-friendly one
+        """
+        async with self.wpa_ctrl.event_subscription() as sub_q:
+            while True:
+                record: EventRecord = await sub_q.get()
+                parsed = WpaEventRecord.from_event_record(record)
+                self.event_bus.put(parsed)
+                self.wpa_events.append(parsed)
 
     async def start(self):
         """Start the underlying WpaCtrl instance."""
         await self.wpa_ctrl.start()
+        self.events_task = asyncio.create_task( self._events_task() )
 
     async def stop(self):
         """Close the control connection cleanly."""
+        if self.events_task:
+            self.events_task.cancel()
+            await self.events_task
         await self.disconnect()  # Ensure clean disconnection
         await self.wpa_ctrl.close()
 
@@ -159,7 +196,7 @@ class WpaOperations:
         if b"OK" not in response:
             raise Exception(f"Failed to set {param}: {response.decode()}")
 
-    async def connect_to_ap(self, config: NetworkConfig, timeout: int = 30):
+    async def connect_to_ap(self, config: NetworkConfig):
         """
         Connect to a Wi-Fi access point without persisting config.
         """
@@ -189,15 +226,15 @@ class WpaOperations:
         # Enable the network (no config saving)
         await self.wpa_ctrl.request(f"ENABLE_NETWORK {network_id}")
 
+    async def wait_for_connection(self):
         # Wait for connection event
-        connected = await self.wpa_ctrl.wait_for_event("CTRL-EVENT-CONNECTED")
+        connected = await self.wait_for_event("CONNECTED")
         if connected:
             log.debug(f"[{self.interface}] WPA_Supplicant connected!")
-            self.connected_network_id = network_id
         else:
             await self.disconnect()
-            raise FailedToConnect(f"[{self.interface}] Failed to connect to {config.ssid} within {timeout} seconds")
-
+            raise FailedToConnect(
+                    f"[{self.interface}] Failed to connect in 30 secs")
         return True
 
     async def disconnect(self):
@@ -206,6 +243,9 @@ class WpaOperations:
             await self.wpa_ctrl.request(f"DISABLE_NETWORK {self.connected_network_id}")
             await self.wpa_ctrl.request(f"REMOVE_NETWORK {self.connected_network_id}")
             self.connected_network_id = None
+
+    async def is_connected(self) -> bool:
+        return False
 
     async def status(self) -> str:
         """Retrieve the current connection status."""
@@ -262,17 +302,55 @@ class WifiClient:
         # Vendor Class ID from dhcp often this is None
         self.vci = None
 
-        # Keep a history of recent events
-        self.wpa_events = deque(maxlen=128)
-
+   
+        self._setup_done = asyncio.Event()
 
         self._generate_wpa_supplicant_config()
+
+        self.event_bus_wpa = self.ops.event_bus
+        self.event_bus_dhcp = self.dhcp.event_bus
+
+    @property
+    def setup_done(self):
+        return self._setup_done.is_set()
+
+    async def setup(self):
+        """
+        Start supplicant, operations and clear dhcp
+        """
+
+        if not self._setup_done.is_set():
+            # The mac _probably_ won't change. So should be ok
+            self.mac = await self.get_mac()
+
+            await self.supplicant.start()
+            await self.ops.start()
+            self.events_task = asyncio.create_task( self._events_task() )
+            await self.full_release()
+            self._setup_done.set()
+
 
     def _generate_wpa_supplicant_config(self):
         with open(self.config_path, 'w') as conf_file:
             conf_file.write(f"ctrl_interface=DIR={self.ctrl_interface} GROUP=netdev\n")
             if self.mac_addr_randomization:
                 conf_file.write("mac_addr=2\n")
+
+    def dict(self):
+        """
+        Return a representation of this class as a dict
+        """
+        data = {
+            "mac": self.mac,
+            "iface": self.interface,
+            "bound": self.bound,
+            "ip": self.ipaddr if self.bound else None,
+            "ns": self.netns if self.netns else None,
+            "vci": self.vci if self.vci else None
+        }
+
+        # Remove None values for cleaner output
+        return {k: v for k, v in data.items() if v is not None}
 
     def __repr__(self):
 
@@ -297,6 +375,7 @@ class WifiClient:
 
     async def connect_and_dhcp(self, config: NetworkConfig):
         await self.connect(config)
+        await self.ops.wait_for_connection()
         await self.start_dhcp()
         await self.wait_for_bind()
         return self
@@ -307,43 +386,28 @@ class WifiClient:
         await self.flush()
 
     async def _events_task(self):
+        """
+        Here we convert the raw event stream to our json-friendly one
+        """
         async with self.ops.wpa_ctrl.event_subscription() as sub_q:
             while True:
                 record: EventRecord = await sub_q.get()
-                # vanilla_record = EventRecord(
-                #     data="<3>SME: Trying to authenticate with 12:19:70:c3:9b:09 (SSID='ssid-bob-1' freq=5180 MHz)",
-                #     timestamp=datetime.datetime(2025, 2, 28, 15, 12, 22, 989768, tzinfo=datetime.timezone.utc)
-                # )
                 parsed = WpaEventRecord.from_event_record(record)
+                self.event_bus.put(parsed)
                 self.wpa_events.append(parsed)
-                if parsed.event_type:
-                    if "BSS_" not in parsed.event_type:
-                        log.info(f"{self.interface}: {parsed.event_type}: {parsed.details}")
-                # TODO: Track disconnections and such here - update the various status
-                # fields
-
 
     async def wifii(self):
         wifiis = await libwifi.WifiInterface.from_iwp(self.netns)
         return next( wifii for wifii in wifiis 
                     if wifii.interface == self.interface)
 
-    async def setup(self):
-        """
-        Start supplicant, operations and clear dhcp
-        """
-
-        # The mac _probably_ won't change. So should be ok
-        self.mac = await self.get_mac()
-
-        await self.supplicant.start()
-        await self.ops.start()
-        self.events_task = asyncio.create_task( self._events_task() )
-        await self.full_release()
-
     @property
     def bound(self):
         return self.dhcp.bound_event.is_set()
+
+    @property
+    def connected(self):
+        return 
 
     async def start_dhcp(self):
         await self.dhcp.start_dhcp()
@@ -354,7 +418,7 @@ class WifiClient:
     async def randomize_mac(self):
         return await self.nu.randomize_mac_macchanger(self.interface)
 
-    async def wait_for_bind(self, timeout=15):
+    async def wait_for_bind(self, timeout=20):
         while True:
             self.ipaddr = None
             try:
@@ -362,7 +426,7 @@ class WifiClient:
             except asyncio.TimeoutError:
                 status = await self.get_status()
                 apmac = status['ap_mac']
-                raise FailedToBind(f"[{self.interface}==>{apmac}] DHCP Timeout")
+                raise FailedToBind(f"[{self.interface}==>{apmac}] DHCP Timeout [{timeout}]")
             else:
                 if not self.dhcp.bound_event.is_set():
                     continue

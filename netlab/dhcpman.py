@@ -7,7 +7,7 @@ from typing import Optional
 
 from netlab.utils import BGTasksMixin
 import logging
-from .utils import EventDeq, EventRecord
+from .utils import EventBus, EventDeq, EventRecord
 
 from .atm import AsyncTaskManager
 from .netutils import NUError, NetworkUtilities
@@ -47,6 +47,8 @@ class DHCPManager(BGTasksMixin):
         self.bgtasks = set()
         self.server = None
         self._quit = asyncio.Event()
+
+        self.event_bus = EventBus()
 
         # Let's keep track of the last 32 events
         self.eventq: EventDeq = deque(maxlen=32)
@@ -148,6 +150,7 @@ if __name__ == "__main__":
                     await self._process_message(message)
                 except NUError:
                     pass
+                self.event_bus.put(message)
         except Exception:
             self.log.exception("DHCP HANDLE EXCEPTION")
         finally:
