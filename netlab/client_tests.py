@@ -15,54 +15,65 @@ class WifiPingTester(BGTasksMixin):
         self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
 
-    async def _ping_clients(self, client1:WifiClient, client2:WifiClient):
+    async def _ping_clients(self, client1:WifiClient, client2:WifiClient, do_reverse=False):
         async with self.semaphore:
 
             #print(f"PING CLIENT: {client1} {client2}")
 
-            ip1 = await client1.get_ip_address()
-            ip2 = await client2.get_ip_address()
-            mac1 = await client1.get_status()
-            mac2 = await client2.get_status()
+            src_ip = await client1.get_ip_address()
+            dst_ip = await client2.get_ip_address()
 
+            forward = None
+            reverse = None
+            src_ext = None
+            dst_ext = None
+
+            # Some of this info is redundant as it's in the dict
             ping_info = {
                 "source": {
                     "client": client1.dict(),
                     "interface": client1.interface,
-                    "ip": ip1,
-                    "mac": mac1['mac'],
-                    "ap_mac": mac1['ap_mac']
+                    "ip": src_ip, 
+                    "mac": await client1.get_mac(),
+                    "ap_mac": await client1.get_ap_mac()
                 },
                 "destination": {
                     "client": client2.dict(),
                     "interface": client2.interface,
-                    "ip": ip2,
-                    "mac": mac2['mac'],
-                    "ap_mac": mac2['ap_mac']
+                    "ip": dst_ip, 
+                    "mac": await client2.get_mac(),
+                    "ap_mac": await client2.get_ap_mac()
                 },
-                "internal": None,
-                "external": None
+                "forward": forward,
+                "reverse": reverse,
+                "src_ext": src_ext,
+                "dst_ext": dst_ext,
                 }
 
-            if ip1 and ip2:
-
-                # OK client 1 pings client 2
+            if src_ip:
                 try:
-                    internal = await client1.ping(client2)
+                    src_ext = await client1.ping("1.1.1.1")
                 except netutils.NUError:
-                    self.log.debug(f"PING FAILED:{client1} -> {client2}")
-                else:
-                    self.log.debug(f"PING OK:{client1} -> {client2}")
-                    ping_info["internal"] = internal
+                    pass
 
-                # OK client 1 pings WAN
+            if dst_ip:
                 try:
-                    external = await client1.ping("1.1.1.1")
+                    dst_ext = await client2.ping("1.1.1.1")
                 except netutils.NUError:
-                    self.log.debug(f"EXTERNAL PING FAILED:{client1} -> 1.1.1.1")
-                else:
-                    self.log.debug(f"EXTERNAL PING OK:{client1} -> 1.1.1.1")
-                    ping_info["external"] = external
+                    pass
+
+            if src_ip and dst_ip:
+
+                try:
+                    forward = await client1.ping(client2)
+                except netutils.NUError:
+                    pass
+
+                if do_reverse:
+                    try:
+                        reverse = await client1.ping(client2)
+                    except netutils.NUError:
+                        pass
 
             return ping_info
 
