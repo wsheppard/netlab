@@ -1,8 +1,7 @@
 from itertools import count
 
 from netlab.netutils import NetworkUtilities
-from . import libwifi
-import sys
+from netlab import libwifi
 import asyncio
 
 def wifi_counter(prefix='wifi'):

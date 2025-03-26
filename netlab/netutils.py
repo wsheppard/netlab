@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import random
 from typing import Dict, List, Optional
+import ipaddress
 
 import logging
 
@@ -16,7 +17,8 @@ class NUError(Exception):
 
     def __str__(self):
         base_message = super().__str__()
-        extra_info = f" RC: {self.task.return_code} {self.task.get_recent_logs(1)}" 
+        extra_info = (f" RC: {self.task.return_code} " 
+                      + str(self.task.get_recent_logs(source='stderr')))
         return base_message + extra_info
 
 class NetworkUtilities:

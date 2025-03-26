@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+import ipaddress
 
 from netlab.utils import BGTasksMixin
 import logging
@@ -74,11 +75,19 @@ def send_update():
     filtered_env = {{key: env[key] for key in INCLUDE_KEYS if key in env}}
     
     data = json.dumps(filtered_env)
-    
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.connect(SOCKET_PATH)
-        s.sendall(data.encode())
-        s.close()
+   
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(SOCKET_PATH)
+            s.sendall(data.encode())
+            s.close()
+    except Exception as e:
+        print("Exception.")
+        print(type(e))
+        print(str(e))
+    else:
+        print("******** SUCCESSFULLY SEND *************")
+
 
 if __name__ == "__main__":
     send_update()
@@ -125,16 +134,20 @@ if __name__ == "__main__":
         """
         async with self._msg_lock:
             if message["reason"] in ["BOUND", "REBOOT"]:
-                await self.net_utils.set_ip_address(self.interface, message["new_ip_address"], "24")
+                await self.net_utils.set_ip_address(self.interface,
+                    message["new_ip_address"], message["new_subnet_mask"])
                 await self.net_utils.set_gateway(message["new_routers"])
+                self.log.warning("Setting bound event...")
                 self.bound_event.set()
             elif message["reason"] in ["RELEASE", "EXPIRE"]:
                 await self.net_utils.flush_ip_address(message["interface"])
                 await self.net_utils.flush_routes(message["interface"])
+                self.log.warning("Clearing bound event...")
                 self.bound_event.clear()
             elif message["reason"] == "PREINIT":
                 await self.net_utils.flush_ip_address(message["interface"])
                 await self.net_utils.flush_routes(message["interface"])
+                self.log.warning("Clearing bound event...")
                 self.bound_event.clear()
 
 
@@ -149,7 +162,8 @@ if __name__ == "__main__":
                 self.eventq.append(EventRecord(message))
                 try:
                     await self._process_message(message)
-                except NUError:
+                except NUError as e:
+                    self.log.warning(f"NUError {e}")
                     pass
                 self.event_bus.put(message)
         except Exception:

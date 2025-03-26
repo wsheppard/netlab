@@ -17,6 +17,9 @@ class LogEntry:
     source: str  
     timestamp: Optional[datetime] = None
 
+    def __repr__(self):
+        return f"[{self.timestamp}][{self.source}] {self.message}"
+
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
