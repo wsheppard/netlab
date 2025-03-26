@@ -111,7 +111,8 @@ if __name__ == "__main__":
             "-pf", str(self.pid_file),
             self.interface
         ]
-        ret = await AsyncTaskManager(args, netns=self.netns, check_time=0)
+        ret = await AsyncTaskManager(args, netns=self.netns, check_time=0,
+                                     log_file="dhcp.log.jsonl.gz")
         self.log.debug(f"DHCP Release: {ret}")
         if removeleasefile:
             if self.lease_file.exists():

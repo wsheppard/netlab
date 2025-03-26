@@ -1,6 +1,6 @@
 from itertools import count
 
-from .netutils import NetworkUtilities
+from netlab.netutils import NetworkUtilities
 from . import libwifi
 import sys
 import asyncio
