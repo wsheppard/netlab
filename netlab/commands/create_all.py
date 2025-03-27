@@ -17,6 +17,8 @@ async def amain():
         mode = wifii['iftype']
         state = await wifii.state()
 
+        print(f"Considering: {iface}, {mode}, {state}")
+
         if mode=="managed" and state=="DOWN":
             namespace = next(counter)
             while await nu.namespace_exists(namespace):
