@@ -28,28 +28,6 @@ class WifiPingTester(BGTasksMixin):
             src_ext = None
             dst_ext = None
 
-            # Some of this info is redundant as it's in the dict
-            ping_info = {
-                "source": {
-                    "client": client1.dict(),
-                    "interface": client1.interface,
-                    "ip": src_ip, 
-                    "mac": await client1.get_mac(),
-                    "ap_mac": await client1.get_ap_mac()
-                },
-                "destination": {
-                    "client": client2.dict(),
-                    "interface": client2.interface,
-                    "ip": dst_ip, 
-                    "mac": await client2.get_mac(),
-                    "ap_mac": await client2.get_ap_mac()
-                },
-                "forward": forward,
-                "reverse": reverse,
-                "src_ext": src_ext,
-                "dst_ext": dst_ext,
-                }
-
             if src_ip:
                 try:
                     src_ext = await client1.ping("1.1.1.1")
@@ -74,6 +52,28 @@ class WifiPingTester(BGTasksMixin):
                         reverse = await client1.ping(client2)
                     except netutils.NUError:
                         pass
+            
+            # Some of this info is redundant as it's in the dict
+            ping_info = {
+                "source": {
+                    "client": client1.dict(),
+                    "interface": client1.interface,
+                    "ip": src_ip, 
+                    "mac": await client1.get_mac(),
+                    "ap_mac": await client1.get_ap_mac()
+                },
+                "destination": {
+                    "client": client2.dict(),
+                    "interface": client2.interface,
+                    "ip": dst_ip, 
+                    "mac": await client2.get_mac(),
+                    "ap_mac": await client2.get_ap_mac()
+                },
+                "forward": forward,
+                "reverse": reverse,
+                "src_ext": src_ext,
+                "dst_ext": dst_ext,
+                }
 
             return ping_info
 
