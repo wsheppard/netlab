@@ -200,7 +200,8 @@ class WpaOperations:
         """
         Connect to a Wi-Fi access point without persisting config.
         """
-        log.info(f"Connecting to network [{config.ssid}] [{config.psk}]  [{config.bssid or ""}]")
+        bssid = config.bssid or ""
+        log.info(f"Connecting to network [{config.ssid}] [{config.psk}]  [{bssid}]")
         self.connected_network_id = None
 
         await self.wpa_ctrl.request("DISCONNECT")
