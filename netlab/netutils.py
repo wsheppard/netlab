@@ -114,9 +114,12 @@ class NetworkUtilities:
             await self._run_command(cmd)
 
     async def ping(self, host: str, count: int = 5) -> Dict[str, str]:
-        task = await self._run_command(["ping", "-c", str(count), host])
-        return self._parse_ping_output("\n".join( log.message for log in
+        try:
+            task = await self._run_command(["ping", "-c", str(count), host])
+            return self._parse_ping_output("\n".join( log.message for log in
                                                  task.get_recent_logs() ))
+        except NUError as nue:
+            return { "res": nue.task.get_recent_logs() }
 
     async def randomize_mac_macchanger(self, interface: str):
         """

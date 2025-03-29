@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from netlab.eventbus import EventBus, SimpleMessage
 from netlab.utils import BGTasksMixin
 from netlab.wpa_operations import WifiClient
 from netlab import netutils
@@ -8,12 +9,18 @@ class WifiPingTester(BGTasksMixin):
 
     log = logging.getLogger("wifi-ping-tester")
 
-    def __init__(self, clients, concurrency=10):
+    def __init__(self, clients, concurrency=10, eventbus:EventBus|None=None, external:str|None=None):
         self.clients = clients
         self.running = False
         self.bgtasks = set()
         self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
+        self.external = external or "1.1.1.1"
+        if eventbus:
+            self.eventbus = eventbus.child("WifiPingTest")
+        else:
+            self.eventbus = None
+
 
     async def _ping_clients(self, client1:WifiClient, client2:WifiClient, do_reverse=False):
         async with self.semaphore:
@@ -29,60 +36,38 @@ class WifiPingTester(BGTasksMixin):
             dst_ext = None
 
             if src_ip:
-                try:
-                    src_ext = await client1.ping("1.1.1.1")
-                except netutils.NUError:
-                    pass
+                src_ext = await client1.ping(self.external)
 
             if dst_ip:
-                try:
-                    dst_ext = await client2.ping("1.1.1.1")
-                except netutils.NUError:
-                    pass
+                dst_ext = await client2.ping(self.external)
 
             if src_ip and dst_ip:
-
-                try:
-                    forward = await client1.ping(client2)
-                except netutils.NUError:
-                    pass
+                forward = await client1.ping(client2)
 
                 if do_reverse:
-                    try:
-                        reverse = await client1.ping(client2)
-                    except netutils.NUError:
-                        pass
-            
-            # Some of this info is redundant as it's in the dict
+                    reverse = await client1.ping(client2)
+
             ping_info = {
-                "source": {
-                    "client": client1.dict(),
-                    "interface": client1.interface,
-                    "ip": src_ip, 
-                    "mac": await client1.get_mac(),
-                    "ap_mac": await client1.get_ap_mac()
-                },
-                "destination": {
-                    "client": client2.dict(),
-                    "interface": client2.interface,
-                    "ip": dst_ip, 
-                    "mac": await client2.get_mac(),
-                    "ap_mac": await client2.get_ap_mac()
-                },
-                "forward": forward,
-                "reverse": reverse,
-                "src_ext": src_ext,
-                "dst_ext": dst_ext,
-                }
+                         "source": client1.wcstate(),
+                         "destination": client2.wcstate(),
+                         "forward": forward,
+                         "reverse": reverse,
+                         "src_ext": src_ext,
+                         "dst_ext": dst_ext,
+                         }
 
             return ping_info
+
+    async def send_bus(self,msg):
+        if self.eventbus:
+            await self.eventbus.emit(SimpleMessage(message=msg))
 
     async def uni_ping_tests(self, source:WifiClient):
         """
         Uni-directional test from source to all configured clients.
         """
         clients = len(self.clients)
-        self.log.info(f"Uni Ping test to {clients} clients")
+        await self.send_bus(f"Uni Ping test to {clients} clients")
         tests = [self._ping_clients(source, client) for client in self.clients]
         return await asyncio.gather(*tests, return_exceptions=True)
 

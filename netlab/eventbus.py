@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from time import time
-from typing import Callable, Optional, List, Literal, TypeVar, Generic, Awaitable
+from typing import Any, Callable, Optional, List, Literal, TypeVar, Generic, Awaitable
 
 from pydantic import BaseModel, Field
 import aioreactive as rx
@@ -21,6 +21,7 @@ class Event(BaseModel, Generic[T]):
     name: str
     path: str           # Path in bus
     data: T            # Typed payload
+    evtype: str
     timestamp: float = Field(default_factory=time)
 
     def render(self) -> str:
@@ -28,6 +29,7 @@ class Event(BaseModel, Generic[T]):
 
 class SimpleMessage(BaseModel):
     message: str
+    data: Any|None = None
     
 system_message_type = Literal[
         "BusCreated",
@@ -113,8 +115,8 @@ class EventBus:
         else:
             return self.name
 
-    async def simple(self, msg:str):
-        await self.emit(SimpleMessage(message=msg))
+    async def simple(self, msg:str, data:Any|None=None):
+        await self.emit(SimpleMessage(message=msg,data=data))
 
     def child(self, name=None, guid=None, subject=None) -> "EventBus":
         child = EventBus(parent=self, guid=guid, name=name)
@@ -134,7 +136,9 @@ class EventBus:
             guid=guid or self.guid,
             name=self.name,
             path=self.path,
+            evtype=type(model).__name__,
             data=model
+
         )
         await self._subject.asend(event)
 
@@ -151,7 +155,7 @@ class EventBus:
         Convenience 
         """
         takeu = rx.take_until( self._destroyed )
-        return pipe(self._subject, takeu, *ops) if ops else self._subject
+        return pipe(self._subject, takeu, *ops)
 
     def observe_types(self, event_types: list[type], *ops: Callable):
         def _type_filter( e:Event ):

@@ -1,7 +1,7 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Dict, Optional, TypeAlias
+from typing import Any, Callable, Deque, Dict, Literal, Optional, Sequence, TypeAlias
 import json
 
 import logging
@@ -9,7 +9,7 @@ import logging
 from pydantic import BaseModel, Field, model_validator
 
 from netlab import libwifi
-from netlab.eventbus import Event, EventBus
+from netlab.eventbus import Event, EventBus, subscribe
 
 from .atm import AsyncTaskManager
 from .dhcpman import DHCPManager
@@ -41,73 +41,148 @@ class NetworkConfig:
     bssid: Optional[str] = None
 
 WPA_DISCONNECT_REASONS = {
-    0: "Unspecified reason",
-    1: "Previous authentication no longer valid",
-    2: "Deauthenticated due to inactivity",
-    3: "Deauthenticated because AP is unable to handle all stations",
-    4: "Class 2 frame received from non-authenticated station",
-    5: "Class 3 frame received from non-associated station",
-    6: "Station has left the BSS",
-    7: "Station requesting (re)association is not authenticated",
-    8: "Disassociated due to inactivity",
-    9: "Disassociated because AP is unable to handle all stations",
+    0:  "Unspecified reason",
+    1:  "Previous authentication no longer valid",
+    2:  "Deauthenticated because sending station is leaving (or has left) the network",
+    3:  "Disassociated because sending station is leaving (or has left) the network",
+    4:  "Class 2 frame received from non-authenticated station",
+    5:  "Class 3 frame received from non-associated station",
+    6:  "Station has left the BSS",
+    7:  "Association request from non-authenticated station",
+    8:  "Disassociated due to inactivity",
+    9:  "Disassociated because station is leaving (or has left) the BSS",
     10: "Class 2 frame received from non-authenticated station",
     11: "Class 3 frame received from non-associated station",
-    12: "Disassociated, leaving due to excessive retries",
-    13: "Disassociated, reason unspecified",
-    14: "Disassociated due to missing PMKSA cache entry",
-    15: "Disassociated due to 4-way handshake timeout",
-    16: "Disassociated due to invalid group cipher",
-    17: "Disassociated due to authentication timeout",
-    18: "Disassociated due to reason outside the standard list",
+    13: "Invalid information element",
+    14: "MIC failure",
+    15: "4-way handshake timeout",
+    16: "Group key handshake timeout",
+    17: "Disassociated because AP is unable to handle all currently associated stations",
     34: "Disassociated because AP requested reassociation",
-    35: "Disassociated due to network congestion",
-    36: "Disassociated due to security policy violation",
+    36: "Requested from peer (usually AP handoff or roaming)",
     37: "Disassociated due to protocol timeout",
     39: "Disassociated due to regulatory reasons",
-    43: "Disassociated due to excessive retries in reassociation",
-    45: "Disassociated due to AP handoff",
+    43: "Disassociated due to excessive reassociation attempts",
+    45: "AP initiated disconnection due to roaming or load balancing",
 }
-        
+
+
+
+WpaEventType = Literal[
+    "SCAN_RESULTS",
+    "AP_AVAILABLE",
+    "AUTH_ATTEMPT",
+    "ASSOCIATE",
+    "ASSOCIATED",
+    "SUBNET_STATUS",
+    "KEY_NEGOTIATION",
+    "CONNECTED",
+    "DISCONNECTED",
+    "SSID_TEMP_DISABLED",
+    "SSID_REENABLED",
+    "EAP_START",
+    "EAP_SUCCESS",
+    "EAP_FAILURE",
+    "BSS_ADDED",
+    "BSS_REMOVED",
+    "REGDOM_CHANGE",
+    "CHANNEL_SWITCH",
+    "ALARM",
+]
+
+
+event_metadata_parsers = {
+    "AUTH_ATTEMPT": re.compile(r"mac=(?P<mac>[0-9a-fA-F:]+).*SSID='(?P<ssid>[^']+)'.*freq=(?P<freq>\d+)"),
+    "ASSOCIATE": re.compile(r"mac=(?P<mac>[0-9a-fA-F:]+).*SSID='(?P<ssid>[^']+)'.*freq=(?P<freq>\d+)"),
+    "ASSOCIATED": re.compile(r"Associated with (?P<mac>[0-9a-fA-F:]+)"),
+    "SUBNET_STATUS": re.compile(r"status=(?P<status>\d+)"),
+    "KEY_NEGOTIATION": re.compile(r"with (?P<mac>[0-9a-fA-F:]+).*PTK=(?P<ptk>\w+).*GTK=(?P<gtk>\w+)"),
+    "CONNECTED": re.compile(r"Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+)"),
+    "DISCONNECTED": re.compile(r"reason=(?P<reason>\d+)"),
+    "SSID_TEMP_DISABLED": re.compile(r"id=(?P<id>\d+)\s+ssid=\"(?P<ssid>[^\"]+)\".*auth_failures=(?P<failures>\d+).*duration=(?P<duration>\d+)"),
+    "SSID_REENABLED": re.compile(r"id=(?P<id>\d+)\s+ssid=\"(?P<ssid>[^\"]+)\""),
+    "BSS_ADDED": re.compile(r"BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+    "BSS_REMOVED": re.compile(r"BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+    "REGDOM_CHANGE": re.compile(r"REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
+    "CHANNEL_SWITCH": re.compile(r"freq=(?P<freq>\d+) width=(?P<width>\d+)"),
+    "ALARM": re.compile(r"ALARM (?P<message>.+)"),
+}
+
 event_patterns = [
-        ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
-        ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
-        ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
-        ("ASSOCIATE", r"<3>Trying to associate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
-        ("ASSOCIATED", r"<3>Associated with (?P<mac>[0-9a-fA-F:]+)"),
-        ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE status=(?P<status>\d+)"),
-        ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with (?P<mac>[0-9a-fA-F:]+) \[PTK=(?P<ptk>\w+) GTK=(?P<gtk>\w+)\]"),
-        ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+).*?\]"),
-        ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED reason=(?P<reason>\d+)"),
-        ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\" auth_failures=(?P<failures>\d+) duration=(?P<duration>\d+)"),
-        ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\""),
-        ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED (?:.*)"),
-        ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
-        ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
-        ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
-        ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
-        ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
-        ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH freq=(?P<freq>\d+) width=(?P<width>\d+)"),
-        ("ALARM", r"<3>CTRL-EVENT-ALARM (?P<message>.+)"),
-        ]
+    ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
+    ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
+    ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with"),
+    ("ASSOCIATE", r"<3>Trying to associate with"),
+    ("ASSOCIATED", r"<3>Associated with"),
+    ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE"),
+    ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with"),
+    ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to"),
+    ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED"),
+    ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED"),
+    ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED"),
+    ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED"),
+    ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
+    ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
+    ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED"),
+    ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED"),
+    ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE"),
+    ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH"),
+    ("ALARM", r"<3>CTRL-EVENT-ALARM"),
+]
+
+
+# event_patterns = [
+#         ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
+#         ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
+#         ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+#         ("ASSOCIATE", r"<3>Trying to associate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+#         ("ASSOCIATED", r"<3>Associated with (?P<mac>[0-9a-fA-F:]+)"),
+#         ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE status=(?P<status>\d+)"),
+#         ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with (?P<mac>[0-9a-fA-F:]+) \[PTK=(?P<ptk>\w+) GTK=(?P<gtk>\w+)\]"),
+#         ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+).*?\]"),
+#         ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED reason=(?P<reason>\d+)"),
+#         ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\" auth_failures=(?P<failures>\d+) duration=(?P<duration>\d+)"),
+#         ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\""),
+#         ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED (?:.*)"),
+#         ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
+#         ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
+#         ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+#         ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+#         ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
+#         ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH freq=(?P<freq>\d+) width=(?P<width>\d+)"),
+#         ("ALARM", r"<3>CTRL-EVENT-ALARM (?P<message>.+)"),
+#         ]
+
+compiled_event_patterns = [
+    (name, re.compile(pattern))
+    for name, pattern in event_patterns
+]
 
 class WpaOEvent(BaseModel):
-    event_type: Optional[str] = None
+    event_type: WpaEventType 
     details: Dict[str, str] = Field(default_factory=dict)
 
+    @classmethod
+    def from_event(cls, event: WpaEvent) -> "WpaOEvent | None":
+        data = event.data
+        for etype, pattern in compiled_event_patterns:
+            if pattern.search(data):
+                details = {}
 
-def parse_event(event:WpaEvent) -> WpaOEvent|None:
-    data = event.data 
-    for etype, pattern in event_patterns:
-        match = re.search(pattern, data)
-        if match:
-            event_type = etype
-            details = match.groupdict()
+                # Try extracting structured metadata if a parser exists
+                parser = event_metadata_parsers.get(etype)
+                if parser:
+                    match = parser.search(data)
+                    if match:
+                        details = match.groupdict()
 
-            if etype == "DISCONNECTED" and "reason" in details:
-                reason_code = int(details["reason"])
-                details["reason_desc"] = WPA_DISCONNECT_REASONS.get(reason_code, "Unknown reason")
-            return WpaOEvent(event_type=event_type, details=details) 
+                # Optionally enrich known fields
+                if etype == "DISCONNECTED" and "reason" in details:
+                    reason_code = int(details["reason"])
+                    details["reason_desc"] = WPA_DISCONNECT_REASONS.get(reason_code, "Unknown reason")
+
+                return WpaOEvent(event_type=etype, details=details)
+
 
 
 class WpaOperations:
@@ -131,16 +206,35 @@ class WpaOperations:
         self.wpa_events: Deque[WpaOEvent] = deque(maxlen=128)
 
     async def wpa_ctrl_events(self, e:Event[WpaEvent]):
-        parsed = parse_event(e.data)
+        parsed = WpaOEvent.from_event(e.data)
         if parsed:
             await self.eventbus.emit(parsed)
             self.wpa_events.append(parsed)
+    
+    async def subscribe_events(self,events:Sequence[str], cb):
+        """
+        Use reactivity to wait for an event
+        """
+        def ev_filter(e:Event):
+            #print(f"EVENT-FILTER: {e} {e.data.event_type} {events}")
+            # return True
+            return e.data.event_type in events
+        
+        def ev_map(e:Event[WpaOEvent]) -> WpaOEvent:
+            # print(f"EVENT-MAP: {e}")
+            return e.data
+
+        await subscribe(self.eventbus.observe_type(
+                    WpaOEvent,
+                    rx.filter(ev_filter), 
+                    rx.map( ev_map )), cb ) 
 
     async def wait_for_event(self,event:str):
         """
         Use reactivity to wait for an event
         """
         def ev_filter(e:Event[WpaOEvent]):
+            # print(f"ITER EVENT: {e}")
             return e.data.event_type == event
 
         async with self.eventbus.iter_type(WpaOEvent, rx.filter( ev_filter )) as events:
@@ -148,7 +242,7 @@ class WpaOperations:
 
     async def start(self):
         """Start the underlying WpaCtrl instance."""
-        await self.wpa_ctrl.eventbus.subscribe(self.wpa_ctrl_events)
+        await self.wpa_ctrl.eventbus.subscribe_type(WpaEvent, self.wpa_ctrl_events)
         await self.wpa_ctrl.start()
 
     async def stop(self):
@@ -185,7 +279,6 @@ class WpaOperations:
         Connect to a Wi-Fi access point without persisting config.
         """
         bssid = config.bssid or ""
-        log.info(f"Connecting to network [{config.ssid}] [{config.psk}]  [{bssid}]")
         self.connected_network_id = None
 
         await self.wpa_ctrl.request("DISCONNECT")
@@ -241,6 +334,18 @@ class WpaOperations:
         response = await self.status()
         return dict(line.split("=", 1) for line in response.strip().split("\n") if "=" in line)
 
+class WCState(BaseModel):
+    mac: str|None
+    apmac: str|None
+    iface: str
+    bound: bool
+    ip: Optional[str]
+    ns: Optional[str]
+    vci: Optional[str] = None
+
+class WCEvent(BaseModel):
+    event: str
+    data: Any|None = None
 
 class WifiClient:
     """
@@ -250,8 +355,7 @@ class WifiClient:
     Can also specify if that interface is inside a net-namespace.
     Also you can specify the log_file name to record all supplicant debug output
     """
-    def __init__(self, interface, netns=None, log_file=None,
-                 eventbus:Optional[EventBus]=None):
+    def __init__(self, interface, netns=None, eventbus:Optional[EventBus]=None):
         self.interface = interface
         self.netns = netns if netns else interface
         self.config_path = f"/tmp/{self.interface}_wpasup.conf"
@@ -271,14 +375,10 @@ class WifiClient:
             "-d"
         ]
                
-        # TODO: Should we always have a log, they can take up a lot of space
-        self.log_file = log_file or f"{self.interface}.log.jsonl"
-
         # This doesn't start it
         self.supplicant = AsyncTaskManager(
                 self.wpa_args,
                 netns=self.netns,
-                log_file=self.log_file,
                 check_time=3,
                 eventbus=self.eventbus
                 )
@@ -290,12 +390,22 @@ class WifiClient:
         self.nu = NetworkUtilities(netns=self.netns)
         self.ipaddr = None
         self.mac = None
+        self.apmac = None
 
         # Vendor Class ID from dhcp often this is None
         self.vci = None
 
         self._setup_done = asyncio.Event()
         self._generate_wpa_supplicant_config()
+
+    async def _events_cb(self, e:WpaOEvent):
+        """
+        This just updates our local copies
+        """
+        if e.event_type=="CONNECTED":
+            self.apmac = e.details['mac']
+        elif e.event_type=="DISCONNECTED":
+            self.apmac = None
 
     @property
     def setup_done(self):
@@ -305,6 +415,8 @@ class WifiClient:
         """
         Start supplicant, operations and clear dhcp
         """
+        await self.send_bus("Subscibing to events...")
+        await self.ops.subscribe_events( "CONNECTED DISCONNECTED".split(), self._events_cb)
 
         if not self._setup_done.is_set():
             # The mac _probably_ won't change. So should be ok
@@ -315,16 +427,15 @@ class WifiClient:
             await self.full_release()
             self._setup_done.set()
 
-
     def _generate_wpa_supplicant_config(self):
         with open(self.config_path, 'w') as conf_file:
             conf_file.write(f"ctrl_interface=DIR={self.ctrl_interface} GROUP=netdev\n")
             if self.mac_addr_randomization:
                 conf_file.write("mac_addr=2\n")
 
-    def dict(self):
+    def wcstate(self):
         """
-        Return a representation of this class as a dict
+        Return a representation of this class as a model
         """
         data = {
             "mac": self.mac,
@@ -332,22 +443,16 @@ class WifiClient:
             "bound": self.bound,
             "ip": self.ipaddr if self.bound else None,
             "ns": self.netns if self.netns else None,
-            "vci": self.vci if self.vci else None
+            "vci": self.vci if self.vci else None,
+            "apmac": self.apmac
         }
+        return WCState(**data)
 
-        # Remove None values for cleaner output
-        return {k: v for k, v in data.items() if v is not None}
+    async def send_bus(self,event,data=None):
+        await self.eventbus.emit(WCEvent(event=event,data=data))
 
     def __repr__(self):
-
-        vci =  f"vci={self.vci}" if self.vci else ""
-        bound = f"bound={self.bound}"
-        ns = f"ns={self.netns}" if self.netns else ""
-        ip = f"ip={self.ipaddr}" if self.bound else ""
-        
-        others = ", ".join( filter(bool, [bound,ip,ns,vci]) ) or ""
-        main = f"WifiClient(mac={self.mac}, iface={self.interface}, {others})"
-        return main
+        return str(self.wcstate())
 
     async def ex_on_disconnect(self):
         """
@@ -356,6 +461,7 @@ class WifiClient:
         while True:
             wifistat = await self.ops.get_status()
             if "COMPLETE" not in wifistat['wpa_state']:
+                await self.send_bus("Lost Connection")
                 raise LostConnection(f"Disconnected on  {self}")
             await asyncio.sleep(5)
 
@@ -388,6 +494,7 @@ class WifiClient:
         await self.dhcp.start_dhcp()
 
     async def connect(self, config: NetworkConfig):
+        await self.send_bus(f"Connecting to network", data=config)
         return await self.ops.connect_to_ap(config)
 
     async def randomize_mac(self):
@@ -401,6 +508,7 @@ class WifiClient:
             except asyncio.TimeoutError:
                 status = await self.get_status()
                 apmac = status['ap_mac']
+                await self.send_bus("Failed to DHCP Bind in time")
                 raise FailedToBind(f"[{self.interface}==>{apmac}] DHCP Timeout [{timeout}]")
             else:
                 if not self.dhcp.bound_event.is_set():
