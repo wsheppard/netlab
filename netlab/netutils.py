@@ -188,8 +188,8 @@ class NetworkUtilities:
             return json.loads(logs[0].message)
 
     async def set_ip_address(self, interface: str, ip_address: str, subnet_mask: str) -> None:
-        log.warning(f"{interface} - Setting ip address: {ip_address}/{subnet_mask}")
-        ret = await self.ipa("add", f"{ip_address}/{subnet_mask}", "dev", interface)
+        # log.warning(f"{interface} - Setting ip address: {ip_address}/{subnet_mask}")
+        await self.ipa("add", f"{ip_address}/{subnet_mask}", "dev", interface)
 
     async def set_gateway(self, gateway_ip: str) -> None:
         await self.ipr("add", "default", "via", gateway_ip)

@@ -9,27 +9,15 @@ from typing import Optional
 
 import logging
 from netlab.utils import BGTasksMixin
+from netlab.eventbus import EventBus, Event, BaseModel
 
-@dataclass
-class LogEntry:
-    """Stores a log message with a timestamp and source."""
+class LogEvent(BaseModel):
     message: str
-    source: str  
-    timestamp: Optional[datetime] = None
+    source: str
 
-    def __repr__(self):
-        return f"[{self.timestamp}][{self.source}] {self.message}"
-
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now()
-
-    def to_json(self) -> str:
-        """Convert LogEntry to a JSON string."""
-        data = asdict(self)
-        data["timestamp"] = self.timestamp.isoformat()  # Ensure datetime is JSON-compatible
-        return json.dumps(data)
-
+class ATMEvent(BaseModel):
+    event: str
+    context: Optional[str]
 
 class AsyncTaskManager(BGTasksMixin):
     """
@@ -63,7 +51,8 @@ class AsyncTaskManager(BGTasksMixin):
                  check_time: int = 0,
                  ssh: Optional[str] = None,
                  env: dict|None = None,
-                 netns: Optional[str] = None):
+                 netns: Optional[str] = None,
+                 eventbus: Optional[EventBus] = None):
         self.args = args
         self.log_file = log_file
         self.buffer_size = buffer_size
@@ -74,9 +63,13 @@ class AsyncTaskManager(BGTasksMixin):
         self.bgtasks = set()
         self.env = env
 
+        if eventbus:
+            self.eventbus = eventbus.child(f"atm-{args[0]}")
+        else:
+            self.eventbus = EventBus(f"atm-{args[0]}")
         self.process: Optional[asyncio.subprocess.Process] = None
 
-        self._log_q = asyncio.Queue()
+        self._log_q: asyncio.Queue[LogEvent] = asyncio.Queue()
         self.log_buffer = deque(maxlen=buffer_size)
 
         self._process_start = asyncio.Event()
@@ -92,6 +85,9 @@ class AsyncTaskManager(BGTasksMixin):
 
     def __await__(self):
         return self.run().__await__()
+    
+    async def send_bus(self, event:str, msg:str|None=None):
+        await self.eventbus.emit(ATMEvent(event=event, context=msg))
 
     async def run(self):
         if not self._process_start.is_set():
@@ -173,34 +169,34 @@ class AsyncTaskManager(BGTasksMixin):
         Monitor for exit of the underlying OR cancellation
         """
         try:
-            await self.simple_log(f"ATM wait for start: {self}", source="atm")
+            await self.send_bus(f"Wait for start")
             await self._process_started.wait()
-            await self.simple_log(f"ATM started: {self}", source="atm")
+            await self.send_bus(f"Started")
             await self.process.wait()
         except asyncio.CancelledError:
             self.log.warning(f"Cancellation in ATM monitor: {self}")
         else:
             self._process_stopped.set()
-            await self.simple_log(f"ATM stopped: {self}", source="atm")
+            await self.send_bus("Stopped", str(self))
             self.log.debug(f"Process {self} has exited with return code: {self.return_code}")
         finally:
             await self.shutdown()
 
-    async def _write_to_log_file(self, entry: LogEntry):
+    # This should be done via observables now
+    async def _write_to_log_file(self, entry: LogEvent):
         if not self.log_file:
             self.log.warning("Refuse to write to no file.")
             return
 
         async with aiofiles.open(self.log_file, 'ab') as f:
             # Compress the JSON line using gzip
-            json_line = entry.to_json() + '\n'
+            json_line = entry.model_dump_json() + '\n'
             compressed_data = gzip.compress(json_line.encode('utf-8'))
             # Write the compressed data to the file
             await f.write(compressed_data)
 
     async def simple_log(self, message, source):
-        entry = LogEntry(timestamp=datetime.now(timezone.utc),
-                         message=message,
+        entry = LogEvent(message=message,
                          source=source)
         await self._log_q.put(entry)
     
@@ -208,6 +204,8 @@ class AsyncTaskManager(BGTasksMixin):
         try:
             while True:
                 le = await self._log_q.get()
+                if self.eventbus:
+                    await self.eventbus.emit(le) 
                 self.log_buffer.append(le)
                 if self.log_file:
                     await self._write_to_log_file(le)
@@ -251,6 +249,11 @@ class AsyncTaskManager(BGTasksMixin):
             await asyncio.sleep(0.5)
 
         await self.bgcancel_and_wait()
+
+        await self.send_bus("Shutdown complete")
+
+        if self.eventbus:
+            await self.eventbus.destroy()
 
         self.log.debug(f"Shutdown complete... {self}")
 

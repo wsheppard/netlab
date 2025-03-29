@@ -8,9 +8,11 @@ from typing import Optional, Tuple
 from typing import Optional
 import weakref
 
+from pydantic import BaseModel
+
+from netlab.eventbus import EventBus
 from netlab.utils import BGTasksMixin
 
-from .utils import EventQ, EventRecord
 
 log = logging.getLogger("BaseSocket")
 
@@ -87,11 +89,16 @@ class WpaBaseSocket(BGTasksMixin):
         if os.path.exists(self.local_path):
             os.unlink(self.local_path)
 
+
+class WpaEvent(BaseModel):
+    data: str
+
+
 class WpaCtrl:
     """
     WpaCtrl manages both control and event communication with wpa_supplicant.
     """
-    def __init__(self, interface):
+    def __init__(self, interface, eventbus: Optional[EventBus] = None):
         self.interface = interface
 
         # Control socket
@@ -103,8 +110,19 @@ class WpaCtrl:
         self._event_task = None
         self._subscribers = []
 
+        if eventbus:
+            self.eventbus = eventbus.child(f"wpactrl-{interface}")
+        else:
+            self.eventbus = EventBus(f"wpactrl-{interface}")
+
     async def start(self):
         await self.ctrl_sock.start()
+
+        self.event_sock = WpaBaseSocket(path=f"/run/wpa_supplicant/{self.interface}")
+        await self.event_sock.start()
+        await self.event_sock.send_raw(b"ATTACH")
+        # Start broadcasting to subscribers
+        self._event_task = asyncio.create_task(self._broadcast_events())
 
     async def close(self):
         await self.ctrl_sock.close()
@@ -122,30 +140,13 @@ class WpaCtrl:
         await self.ctrl_sock.send_raw(cmd.encode())
         return await asyncio.wait_for(self.ctrl_sock.queue.get(), timeout=timeout)
 
-    async def _start_event_listener(self):
-        """
-        Lazy-init the event listener and ATTACH.
-        """
-        if self.event_sock:
-            return
-        
-        self.event_sock = WpaBaseSocket(path=f"/run/wpa_supplicant/{self.interface}")
-        await self.event_sock.start()
-        await self.event_sock.send_raw(b"ATTACH")
-
-        # Start broadcasting to subscribers
-        self._event_task = asyncio.create_task(self._broadcast_events())
-
     async def _broadcast_events(self):
         while self.event_sock:
             try:
                 data: bytes = await self.event_sock.queue.get()
                 log.debug(f"Event: {data}")
-                record = EventRecord(data=data.decode())
-                for subref in self._subscribers:
-                    sub = subref()
-                    if sub:
-                        sub.put_nowait(record)
+                record = WpaEvent(data=data.decode())
+                await self.eventbus.emit(record)
             except asyncio.CancelledError:
                 break
 
@@ -153,32 +154,4 @@ class WpaCtrl:
         log.warning(f"DUMP-Q: {ref}")
         self._subscribers.remove(ref)
 
-    async def subscribe_events(self) -> Tuple[asyncio.Queue, weakref.ref]:
-        """Creates a new subscriber queue and starts the event listener if needed."""
-        await self._start_event_listener()
-        q = asyncio.Queue()
-        q_ref = weakref.ref(q, self._dump_q)
-        self._subscribers.append(q_ref)
-        return q, q_ref
-
-    class EventSubscription:
-        """Context manager for event queue cleanup."""
-        def __init__(self, event_manager):
-            self.event_manager = event_manager
-            self.queue = None
-            self.queue_ref = None
-
-        async def __aenter__(self):
-            self.queue, self.queue_ref = await self.event_manager.subscribe_events()
-            return self.queue
-
-        async def __aexit__(self, exc_type, exc, tb):
-            if self.queue_ref in self.event_manager._subscribers:
-                self.event_manager._subscribers.remove(self.queue_ref)
-            self.queue = None
-            self.queue_ref = None
-            return True
-
-    def event_subscription(self):
-        return self.EventSubscription(self)
     

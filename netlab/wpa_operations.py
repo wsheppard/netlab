@@ -1,21 +1,27 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Optional, TypeAlias
+from typing import Callable, Deque, Dict, Optional, TypeAlias
 import json
 
 import logging
 
+from pydantic import BaseModel, Field, model_validator
+
 from netlab import libwifi
-from netlab.utils import EventBus, EventRecord
+from netlab.eventbus import Event, EventBus
 
 from .atm import AsyncTaskManager
 from .dhcpman import DHCPManager
 from .netutils import NetworkUtilities
-from .wpa_base import WpaCtrl
+from .wpa_base import WpaCtrl, WpaEvent
 import re
 import datetime
 from dataclasses import dataclass, field
+
+import aioreactive as rx
+
+
 
 log = logging.getLogger("WpaOperations")
 
@@ -62,59 +68,47 @@ WPA_DISCONNECT_REASONS = {
     43: "Disassociated due to excessive retries in reassociation",
     45: "Disassociated due to AP handoff",
 }
-
-@dataclass
-class WpaEventRecord(EventRecord):
-    event_type: str|None = None
-    details: dict = field(default_factory=dict)
-
-    def __post_init__(self):
-        self._parse_data()
-
-    @classmethod
-    def from_event_record(cls, record: EventRecord) -> "WpaEventRecord":
-        return cls(data=record.data, timestamp=record.timestamp)
-
-    def _parse_data(self):
-        event_patterns = [
-            ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
-            ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
-            ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
-            ("ASSOCIATE", r"<3>Trying to associate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
-            ("ASSOCIATED", r"<3>Associated with (?P<mac>[0-9a-fA-F:]+)"),
-            ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE status=(?P<status>\d+)"),
-            ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with (?P<mac>[0-9a-fA-F:]+) \[PTK=(?P<ptk>\w+) GTK=(?P<gtk>\w+)\]"),
-            ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+).*?\]"),
-            ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED reason=(?P<reason>\d+)"),
-            ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\" auth_failures=(?P<failures>\d+) duration=(?P<duration>\d+)"),
-            ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\""),
-            ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED (?:.*)"),
-            ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
-            ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
-            ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
-            ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
-            ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
-            ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH freq=(?P<freq>\d+) width=(?P<width>\d+)"),
-            ("ALARM", r"<3>CTRL-EVENT-ALARM (?P<message>.+)"),
+        
+event_patterns = [
+        ("SCAN_RESULTS", r"<3>CTRL-EVENT-SCAN-RESULTS"),
+        ("AP_AVAILABLE", r"<3>WPS-AP-AVAILABLE"),
+        ("AUTH_ATTEMPT", r"<3>SME: Trying to authenticate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+        ("ASSOCIATE", r"<3>Trying to associate with (?P<mac>[0-9a-fA-F:]+) \(SSID='(?P<ssid>[^']+)' freq=(?P<freq>\d+) MHz\)"),
+        ("ASSOCIATED", r"<3>Associated with (?P<mac>[0-9a-fA-F:]+)"),
+        ("SUBNET_STATUS", r"<3>CTRL-EVENT-SUBNET-STATUS-UPDATE status=(?P<status>\d+)"),
+        ("KEY_NEGOTIATION", r"<3>WPA: Key negotiation completed with (?P<mac>[0-9a-fA-F:]+) \[PTK=(?P<ptk>\w+) GTK=(?P<gtk>\w+)\]"),
+        ("CONNECTED", r"<3>CTRL-EVENT-CONNECTED - Connection to (?P<mac>[0-9a-fA-F:]+) completed \[id=(?P<id>\d+).*?\]"),
+        ("DISCONNECTED", r"<3>CTRL-EVENT-DISCONNECTED reason=(?P<reason>\d+)"),
+        ("SSID_TEMP_DISABLED", r"<3>CTRL-EVENT-SSID-TEMP-DISABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\" auth_failures=(?P<failures>\d+) duration=(?P<duration>\d+)"),
+        ("SSID_REENABLED", r"<3>CTRL-EVENT-SSID-REENABLED id=(?P<id>\d+) ssid=\"(?P<ssid>[^\"]+)\""),
+        ("EAP_START", r"<3>CTRL-EVENT-EAP-STARTED (?:.*)"),
+        ("EAP_SUCCESS", r"<3>CTRL-EVENT-EAP-SUCCESS"),
+        ("EAP_FAILURE", r"<3>CTRL-EVENT-EAP-FAILURE"),
+        ("BSS_ADDED", r"<3>CTRL-EVENT-BSS-ADDED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+        ("BSS_REMOVED", r"<3>CTRL-EVENT-BSS-REMOVED (?P<bss_id>\d+) (?P<mac>[0-9a-fA-F:]+)"),
+        ("REGDOM_CHANGE", r"<3>CTRL-EVENT-REGDOM-CHANGE (?P<change_type>\w+) (?P<country>\w+)"),
+        ("CHANNEL_SWITCH", r"<3>CTRL-EVENT-CHANNEL-SWITCH freq=(?P<freq>\d+) width=(?P<width>\d+)"),
+        ("ALARM", r"<3>CTRL-EVENT-ALARM (?P<message>.+)"),
         ]
 
-        for etype, pattern in event_patterns:
-            match = re.search(pattern, self.data)
-            if match:
-                self.event_type = etype
-                self.details = match.groupdict()
+class WpaOEvent(BaseModel):
+    event_type: Optional[str] = None
+    details: Dict[str, str] = Field(default_factory=dict)
 
-                # If it's a disconnection event, add reason description
-                if etype == "DISCONNECTED" and "reason" in self.details:
-                    reason_code = int(self.details["reason"])
-                    self.details["reason_desc"] = WPA_DISCONNECT_REASONS.get(reason_code, "Unknown reason")
-                break
 
-    def get_event(self):
-        """Returns the parsed event type and details."""
-        return self.event_type, self.details
+def parse_event(event:WpaEvent) -> WpaOEvent|None:
+    data = event.data 
+    for etype, pattern in event_patterns:
+        match = re.search(pattern, data)
+        if match:
+            event_type = etype
+            details = match.groupdict()
 
-WpaEventDeq: TypeAlias = Deque[WpaEventRecord]
+            if etype == "DISCONNECTED" and "reason" in details:
+                reason_code = int(details["reason"])
+                details["reason_desc"] = WPA_DISCONNECT_REASONS.get(reason_code, "Unknown reason")
+            return WpaOEvent(event_type=event_type, details=details) 
+
 
 class WpaOperations:
     """
@@ -122,53 +116,70 @@ class WpaOperations:
     No configurations are saved; all settings are temporary.
     """
 
-    def __init__(self, interface: str = "wlan0"):
+    def __init__(self, interface: str = "wlan0", eventbus: Optional[EventBus]=None):
         self.interface = interface
-        self.wpa_ctrl = WpaCtrl(interface)
         self.connected_network_id: Optional[int] = None
-        self.events_task = None
-        self.event_bus = EventBus()
+
+        if eventbus:
+            self.eventbus = eventbus.child(f"wpao-{interface}")
+        else:
+            self.eventbus = EventBus(f"wpao-{interface}")
+        
+        self.wpa_ctrl = WpaCtrl(interface, self.eventbus)
+
         # Keep a history of recent events
-        self.wpa_events:WpaEventDeq = deque(maxlen=128)
-    
-    async def _wait_for_event(self, matcher:Callable[[WpaEventRecord],bool]) -> Optional[WpaEventRecord]:
-        async with self.event_bus as sub_q:
-            while True:
-                record: WpaEventRecord = await sub_q.get()
-                if matcher(record):
-                    return record
+        self.wpa_events: Deque[WpaOEvent] = deque(maxlen=128)
 
-    async def wait_for_event(self, event: str, timeout=30) -> Optional[WpaEventRecord]:
-        # Simple event name matcher
-        def match_event(new_event:WpaEventRecord):
-            if new_event.event_type:
-                return event in new_event.event_type
-            return False
+    async def wpa_ctrl_events(self, e:Event[WpaEvent]):
+        parsed = parse_event(e.data)
+        if parsed:
+            await self.eventbus.emit(parsed)
+            self.wpa_events.append(parsed)
 
-        return await asyncio.wait_for( self._wait_for_event(match_event), timeout )
-    
+    # async def _wait_for_event(self, matcher:Callable[[WpaEventRecord],bool]) -> Optional[WpaEventRecord]:
+    #     async with self.event_bus as sub_q:
+    #         while True:
+    #             record: WpaEventRecord = await sub_q.get()
+    #             if matcher(record):
+    #                 return record
 
-    async def _events_task(self):
+    # async def wait_for_event(self, event: str, timeout=30) -> Optional[WpaEventRecord]:
+    #     # Simple event name matcher
+    #     def match_event(new_event:WpaEventRecord):
+    #         if new_event.event_type:
+    #             return event in new_event.event_type
+    #         return False
+
+    #     return await asyncio.wait_for( self._wait_for_event(match_event), timeout )
+
+    async def wait_for_event(self,event:str):
         """
-        Here we convert the raw event stream to our json-friendly one
+        Use reactivity to wait for an event
         """
-        async with self.wpa_ctrl.event_subscription() as sub_q:
-            while True:
-                record: EventRecord = await sub_q.get()
-                parsed = WpaEventRecord.from_event_record(record)
-                self.event_bus.put(parsed)
-                self.wpa_events.append(parsed)
+        def ev_filter(e:Event[WpaOEvent]):
+            return e.data.event_type == event
+
+        async with self.eventbus.iter_type(WpaOEvent, rx.filter( ev_filter )) as events:
+            return await anext(events)
+
+    # async def _events_task(self):
+    #     """
+    #     Here we convert the raw event stream to our json-friendly one
+    #     """
+    #     async with self.wpa_ctrl.event_subscription() as sub_q:
+    #         while True:
+    #             record: WpaEventRecord = await sub_q.get()
+    #             parsed = WpaEventRecord.from_event_record(record)
+    #             self.event_bus.put(parsed)
+    #             self.wpa_events.append(parsed)
 
     async def start(self):
         """Start the underlying WpaCtrl instance."""
+        await self.wpa_ctrl.eventbus.subscribe(self.wpa_ctrl_events)
         await self.wpa_ctrl.start()
-        self.events_task = asyncio.create_task( self._events_task() )
 
     async def stop(self):
         """Close the control connection cleanly."""
-        if self.events_task:
-            self.events_task.cancel()
-            await self.events_task
         await self.disconnect()  # Ensure clean disconnection
         await self.wpa_ctrl.close()
 
@@ -266,11 +277,17 @@ class WifiClient:
     Can also specify if that interface is inside a net-namespace.
     Also you can specify the log_file name to record all supplicant debug output
     """
-    def __init__(self, interface, netns=None, log_file=None):
+    def __init__(self, interface, netns=None, log_file=None,
+                 eventbus:Optional[EventBus]=None):
         self.interface = interface
         self.netns = netns if netns else interface
         self.config_path = f"/tmp/{self.interface}_wpasup.conf"
         self.ctrl_interface = "/var/run/wpa_supplicant"
+
+        if eventbus:
+            self.eventbus = eventbus.child(f"wificlient-{interface}")
+        else:
+            self.eventbus = EventBus(f"wificlient-{interface}")
 
         # This adds an option to the supplicant config
         self.mac_addr_randomization = False
@@ -289,13 +306,14 @@ class WifiClient:
                 self.wpa_args,
                 netns=self.netns,
                 log_file=self.log_file,
-                check_time=3
+                check_time=3,
+                eventbus=self.eventbus
                 )
 
         # Operations dont usually care about namespaces because the unix socket is in the
         # filesystem context which remains the same
-        self.ops = WpaOperations(self.interface)
-        self.dhcp = DHCPManager(self.interface, netns=self.netns)
+        self.ops = WpaOperations(self.interface,eventbus=self.eventbus)
+        self.dhcp = DHCPManager(self.interface, netns=self.netns, eventbus=self.eventbus)
         self.nu = NetworkUtilities(netns=self.netns)
         self.ipaddr = None
         self.mac = None
@@ -303,13 +321,8 @@ class WifiClient:
         # Vendor Class ID from dhcp often this is None
         self.vci = None
 
-   
         self._setup_done = asyncio.Event()
-
         self._generate_wpa_supplicant_config()
-
-        self.event_bus_wpa = self.ops.event_bus
-        self.event_bus_dhcp = self.dhcp.event_bus
 
     @property
     def setup_done(self):
@@ -326,7 +339,6 @@ class WifiClient:
 
             await self.supplicant.start()
             await self.ops.start()
-            self.events_task = asyncio.create_task( self._events_task() )
             await self.full_release()
             self._setup_done.set()
 
@@ -386,17 +398,6 @@ class WifiClient:
         await self.disconnect()
         await self.flush()
 
-    async def _events_task(self):
-        """
-        Here we convert the raw event stream to our json-friendly one
-        """
-        async with self.ops.wpa_ctrl.event_subscription() as sub_q:
-            while True:
-                record: EventRecord = await sub_q.get()
-                parsed = WpaEventRecord.from_event_record(record)
-                self.event_bus.put(parsed)
-                self.wpa_events.append(parsed)
-
     async def wifii(self):
         wifiis = await libwifi.WifiInterface.from_iwp(self.netns)
         return next( wifii for wifii in wifiis 
@@ -434,7 +435,7 @@ class WifiClient:
                 self.ipaddr = await self.get_ip_address()
                 le = self.dhcp.eventq[-1]
                 if le:
-                    self.vci = le.data.get("new_vendor_class_identifier")
+                    self.vci = le.message.get("new_vendor_class_identifier")
                 return True
 
     async def disconnect(self):

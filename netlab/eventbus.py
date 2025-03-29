@@ -18,6 +18,8 @@ NULL_GUID = "00000000-0000-0000-0000-000000000000"
 
 class Event(BaseModel, Generic[T]):
     guid: str                  # Emitter GUID (source of the event)
+    name: str
+    path: str           # Path in bus
     data: T            # Typed payload
     timestamp: float = Field(default_factory=time)
 
@@ -55,15 +57,34 @@ async def subscribe(
     observer = rx.AsyncAnonymousObserver(asend=on_next, athrow=on_error, aclose=on_completed)
     return await observable.subscribe_async(observer)
 
+from aioreactive import AsyncIteratorObserver, AsyncObservable
+from typing import AsyncIterator, TypeVar, Generic
+
+_T = TypeVar("_T")
+
+class LazyIterSubscription(Generic[_T]):
+    def __init__(self, source: AsyncObservable[_T]):
+        self._observer = AsyncIteratorObserver(source)
+
+    async def __aenter__(self) -> AsyncIterator[_T]:
+        # triggers lazy subscription on first iteration
+        return self._observer
+
+    async def __aexit__(self, *args):
+        await self._observer.dispose_async()
+
+    def __aiter__(self) -> AsyncIterator[_T]:
+        return self._observer
+
 
 # --- EventBus ---
 
 class EventBus:
     def __init__(
         self,
+        name: Optional[str] = None,
         parent: Optional["EventBus"] = None,
         guid: Optional[str] = None,
-        name: Optional[str] = None,
         subject: Optional[AsyncSubject] = None,
     ):
         self.guid = guid or str(uuid.uuid4())
@@ -83,7 +104,7 @@ class EventBus:
         else:
             return self.name
 
-    def child(self, guid=None, name=None, subject=None) -> "EventBus":
+    def child(self, name=None, guid=None, subject=None) -> "EventBus":
         child = EventBus(parent=self, guid=guid, name=name, subject=subject)
         self._children.append(child)
         return child
@@ -99,6 +120,8 @@ class EventBus:
     async def emit(self, model: BaseModel, guid: Optional[str] = None):
         event = Event(
             guid=guid or self.guid,
+            name=self.name,
+            path=self.path,
             data=model
         )
         await self._emit_upwards(event)
@@ -117,11 +140,37 @@ class EventBus:
         """
         return pipe(self._subject, *ops) if ops else self._subject
 
-    async def subscribe(
+    def observe_types(self, event_types: list[type], *ops: Callable):
+        def _type_filter( e:Event ):
+            return isinstance( e.data, tuple(event_types) )
+        filt = rx.filter( _type_filter )
+        return self.observe(filt, *ops)
+
+    def observe_type(self, event_type: type, *ops: Callable):
+        return self.observe_types([event_type], *ops)
+
+    def subscribe(
         self,
         on_next: Callable[[Event], Awaitable[None]]):
-        return await subscribe( self.observe(), on_next )
+        return subscribe( self.observe(), on_next )
 
+    def subscribe_types(
+        self,
+        event_types: list[type],
+        on_next: Callable[[Event], Awaitable[None]]):
+        return subscribe( self.observe_types(event_types), on_next )
+
+    def subscribe_type(
+        self,
+        event_type: type,
+        on_next: Callable[[Event], Awaitable[None]]):
+        return self.subscribe_types([event_type], on_next)
+
+    def iter_type(self, event_type: type, *ops: Callable) -> LazyIterSubscription:
+        return LazyIterSubscription(self.observe_type(event_type, *ops))
+
+    def iter_types(self, event_types: list[type], *ops: Callable) -> LazyIterSubscription:
+        return LazyIterSubscription(self.observe_types(event_types, *ops))
 
     def _get_root(self) -> "EventBus":
         return self if not self.parent else self.parent._get_root()

@@ -3,15 +3,26 @@ from collections import deque
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Deque, Optional, Sequence
 import ipaddress
 
 from netlab.utils import BGTasksMixin
 import logging
-from .utils import EventBus, EventDeq, EventRecord
+from .eventbus import EventBus
 
 from .atm import AsyncTaskManager
 from .netutils import NUError, NetworkUtilities
+from netlab.eventbus import EventBus, Event, BaseModel, subscribe
+
+
+class DHCPEvent(BaseModel):
+    reason: str
+    message: dict
+    iface: str
+
+class DHCPMan(BaseModel):
+    iface: str
+    message: str
 
 class DHCPManager(BGTasksMixin):
 
@@ -20,12 +31,14 @@ class DHCPManager(BGTasksMixin):
     WORK_DIR = Path("/tmp/dhcpmanager")
 
     INCLUDE_KEYS = [ 
-                    "reason", "interface", "new_ip_address", "new_routers",
+                    "reason", "interface", "new_ip_address",
+                    "new_routers","new_domain_name_servers", "new_domain_name",
                     "new_vendor_class_identifier",
                     "new_subnet_mask", "new_dhcp_lease_time", "new_dhcp_server_identifier"
                     ]
 
-    def __init__(self, interface: str, netns: Optional[str] = None):
+    def __init__(self, interface: str, netns: Optional[str] = None, 
+                 eventbus: Optional[EventBus] = None):
         self.interface = interface
         self.netns = netns
         self.lease_file = self.WORK_DIR / f"{interface}.lease"
@@ -49,10 +62,13 @@ class DHCPManager(BGTasksMixin):
         self.server = None
         self._quit = asyncio.Event()
 
-        self.event_bus = EventBus()
+        if eventbus:
+            self.eventbus = eventbus.child(f"dhcp-{interface}")
+        else:
+            self.eventbus = EventBus(name=f"dhcp-{interface}")
 
         # Let's keep track of the last 32 events
-        self.eventq: EventDeq = deque(maxlen=32)
+        self.eventq: Deque[DHCPEvent] = deque(maxlen=32)
   
     def _generate_script(self):
         """
@@ -128,26 +144,38 @@ if __name__ == "__main__":
                 self.lease_file.unlink()
                 self.lease_file.touch()
 
-    async def _process_message(self, message):
+    async def send_bus(self, msg:str):
+        await self.eventbus.emit( DHCPMan(
+        iface = self.interface,
+            message=msg) )
+
+    async def _process_message(self, event: Event[DHCPEvent]):
         """
         This is where our events get to eventually
         """
+        devent = event.data
+        message = devent.message
+
         async with self._msg_lock:
-            if message["reason"] in ["BOUND", "REBOOT"]:
-                await self.net_utils.set_ip_address(self.interface,
-                    message["new_ip_address"], message["new_subnet_mask"])
-                await self.net_utils.set_gateway(message["new_routers"])
-                self.log.warning("Setting bound event...")
+
+            self.log.debug(f"Process message: {message}")
+
+            if devent.reason in ["BOUND", "REBOOT"]:
+                ip,sm = message["new_ip_address"], message["new_subnet_mask"]
+                # TODO: These can be multiple..
+                gw,dns = message["new_routers"], message["new_domain_name_servers"] 
+                await self.send_bus(f"Setting ip address to {ip}/{sm}")
+                await self.net_utils.set_ip_address(self.interface,ip, sm)
+                await self.send_bus(f"Setting gateway address to {gw}")
+                await self.net_utils.set_gateway(gw)
+                await self.send_bus(f"Setting dns to {dns}")
+                await self.send_bus("Bound event complete")
                 self.bound_event.set()
-            elif message["reason"] in ["RELEASE", "EXPIRE"]:
+            elif devent.reason in ["RELEASE", "EXPIRE", "PREINIT"]:
+                await self.send_bus("Flushing addresses and routes....")
                 await self.net_utils.flush_ip_address(message["interface"])
                 await self.net_utils.flush_routes(message["interface"])
-                self.log.warning("Clearing bound event...")
-                self.bound_event.clear()
-            elif message["reason"] == "PREINIT":
-                await self.net_utils.flush_ip_address(message["interface"])
-                await self.net_utils.flush_routes(message["interface"])
-                self.log.warning("Clearing bound event...")
+                await self.send_bus("Clearing bound event...")
                 self.bound_event.clear()
 
 
@@ -158,14 +186,11 @@ if __name__ == "__main__":
                 if not data:
                     break
                 message = json.loads(data.decode())
-                self.log.info(f"Received DHCP event: {message}")
-                self.eventq.append(EventRecord(message))
-                try:
-                    await self._process_message(message)
-                except NUError as e:
-                    self.log.warning(f"NUError {e}")
-                    pass
-                self.event_bus.put(message)
+                self.log.debug(f"Received DHCP event: {message}")
+                reason = message.pop("reason")
+                event = DHCPEvent(reason=reason, message=message, iface=self.interface)
+                await self.eventbus.emit(event)
+                self.eventq.append(event)
         except Exception:
             self.log.exception("DHCP HANDLE EXCEPTION")
         finally:
@@ -173,9 +198,7 @@ if __name__ == "__main__":
             writer.close()
 
     async def wait_for_bind(self):
-        self.log.warning("Wait for bind....")
         await self.bound_event.wait()
-        self.log.warning("Bound!")
 
     async def start_dhcp(self):
         self.bound_event.clear()
@@ -185,16 +208,20 @@ if __name__ == "__main__":
         await self._stop_previous()
 
         self._generate_script()
-        self.log.info(f"Starting dhclient on {self.interface} with script {self.script_file}...")
+        await self.send_bus(f"Starting dhclient on {self.interface} with script {self.script_file}...")
 
         # with open(self.lease_file) as f:
         #     for line in f:
         #         print(line)
 
-        self._dhcptask = AsyncTaskManager(self.args, netns=self.netns, check_time=0)
+        await self.eventbus.subscribe_type( DHCPEvent, self._process_message )
+
+        self._dhcptask = AsyncTaskManager(self.args, netns=self.netns, check_time=0,
+                                          eventbus=self.eventbus)
         await self._dhcptask.start()
         if not self._socktask:
             self._socktask = self.bgadd(self._listen_for_events(),"dhcp_listener")
+
 
     async def _stop_previous(self):
         self.log.debug(f"Stopping any existing dhclient on {self.interface}...")
@@ -213,6 +240,7 @@ if __name__ == "__main__":
     async def shutdown(self):
         if self._dhcptask:
             await self._dhcptask.shutdown()
+        await self.eventbus.destroy()
 
     async def manage_dhcp(self):
         await self.start_dhcp()
