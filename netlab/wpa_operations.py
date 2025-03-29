@@ -136,22 +136,6 @@ class WpaOperations:
             await self.eventbus.emit(parsed)
             self.wpa_events.append(parsed)
 
-    # async def _wait_for_event(self, matcher:Callable[[WpaEventRecord],bool]) -> Optional[WpaEventRecord]:
-    #     async with self.event_bus as sub_q:
-    #         while True:
-    #             record: WpaEventRecord = await sub_q.get()
-    #             if matcher(record):
-    #                 return record
-
-    # async def wait_for_event(self, event: str, timeout=30) -> Optional[WpaEventRecord]:
-    #     # Simple event name matcher
-    #     def match_event(new_event:WpaEventRecord):
-    #         if new_event.event_type:
-    #             return event in new_event.event_type
-    #         return False
-
-    #     return await asyncio.wait_for( self._wait_for_event(match_event), timeout )
-
     async def wait_for_event(self,event:str):
         """
         Use reactivity to wait for an event
@@ -161,17 +145,6 @@ class WpaOperations:
 
         async with self.eventbus.iter_type(WpaOEvent, rx.filter( ev_filter )) as events:
             return await anext(events)
-
-    # async def _events_task(self):
-    #     """
-    #     Here we convert the raw event stream to our json-friendly one
-    #     """
-    #     async with self.wpa_ctrl.event_subscription() as sub_q:
-    #         while True:
-    #             record: WpaEventRecord = await sub_q.get()
-    #             parsed = WpaEventRecord.from_event_record(record)
-    #             self.event_bus.put(parsed)
-    #             self.wpa_events.append(parsed)
 
     async def start(self):
         """Start the underlying WpaCtrl instance."""

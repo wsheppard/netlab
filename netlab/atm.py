@@ -260,7 +260,7 @@ class AsyncTaskManager(BGTasksMixin):
     async def check_process_alive(self, delay: int = 3):
         """Wait and verify if the process is still running, without interrupting wait."""
 
-        self.log.info("Checking process is still alive...")
+        await self.send_bus("Checking process is still alive...")
         await self._process_started.wait()
 
         try:
@@ -269,9 +269,9 @@ class AsyncTaskManager(BGTasksMixin):
             self.log.error(f"Process EXITED {self}")
             for log in logs:
                 self.log.error(log.message)
-            raise RuntimeError(f"Process {self.process} exited unexpectedly during check.")
+            raise RuntimeError(f"Process {self} exited unexpectedly during check.")
         except asyncio.TimeoutError:
-            self.log.info(f"Process {self.process} still running after {delay} seconds.")
+            await self.send_bus(f"Process {self.process} still running after {delay} seconds.")
 
     def logsource(self,source="stdout"):
         return ( log for log in self.log_buffer if log.source==source )

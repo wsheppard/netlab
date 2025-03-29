@@ -45,7 +45,6 @@ class DHCPManager(BGTasksMixin):
         self.pid_file = self.WORK_DIR / f"{interface}.pid"
         self.script_file = self.WORK_DIR / f"{interface}_script.py"
         self.socket_file = self.WORK_DIR / f"{interface}.sock"
-        self.net_utils = NetworkUtilities(netns=netns)
         self.WORK_DIR.mkdir(parents=True, exist_ok=True)
         self.args = args = [
             "dhclient", "-d", "-v",
@@ -67,6 +66,8 @@ class DHCPManager(BGTasksMixin):
         else:
             self.eventbus = EventBus(name=f"dhcp-{interface}")
 
+        #self.net_utils = NetworkUtilities(netns=netns,eventbus=self.eventbus)
+        self.net_utils = NetworkUtilities(netns=netns)
         # Let's keep track of the last 32 events
         self.eventq: Deque[DHCPEvent] = deque(maxlen=32)
   
@@ -136,8 +137,8 @@ if __name__ == "__main__":
             "-pf", str(self.pid_file),
             self.interface
         ]
-        ret = await AsyncTaskManager(args, netns=self.netns, check_time=0,
-                                     log_file="dhcp.log.jsonl.gz")
+        ret = await AsyncTaskManager(args, netns=self.netns,
+                                     check_time=0,eventbus=self.eventbus)
         self.log.debug(f"DHCP Release: {ret}")
         if removeleasefile:
             if self.lease_file.exists():

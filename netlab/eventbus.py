@@ -92,10 +92,19 @@ class EventBus:
         self.parent = parent
         self._subject: AsyncSubject = subject or AsyncSubject()
         self._children: List["EventBus"] = []
-        self._subs: List[Awaitable[AsyncDisposable]] = []
 
         self._destroyed: AsyncSubject[bool] = AsyncSubject()
         asyncio.ensure_future(self._emit_system("BusCreated"))
+
+        if parent:
+            psub = self.subscribe( self._push_to_parent ) 
+            asyncio.ensure_future(psub)
+        else:
+            self._parent_subs = None
+
+    async def _push_to_parent(self, e:Event):
+        if self.parent:
+            await self.parent._subject.asend(e)
 
     @property
     def path(self):
@@ -104,8 +113,11 @@ class EventBus:
         else:
             return self.name
 
+    async def simple(self, msg:str):
+        await self.emit(SimpleMessage(message=msg))
+
     def child(self, name=None, guid=None, subject=None) -> "EventBus":
-        child = EventBus(parent=self, guid=guid, name=name, subject=subject)
+        child = EventBus(parent=self, guid=guid, name=name)
         self._children.append(child)
         return child
 
@@ -124,7 +136,7 @@ class EventBus:
             path=self.path,
             data=model
         )
-        await self._emit_upwards(event)
+        await self._subject.asend(event)
 
     async def _emit_upwards(self, event: Event):
         await self._subject.asend(event)
@@ -134,11 +146,12 @@ class EventBus:
     async def _emit_system(self, type_: system_message_type):
         await self.emit(SystemMessage(type=type_, bus=self.guid, name=self.name), guid=NULL_GUID)
 
-    def observe(self, *ops: Callable) -> rx.AsyncSubject:
+    def observe(self, *ops: Callable) -> rx.AsyncObservable:
         """
         Convenience 
         """
-        return pipe(self._subject, *ops) if ops else self._subject
+        takeu = rx.take_until( self._destroyed )
+        return pipe(self._subject, takeu, *ops) if ops else self._subject
 
     def observe_types(self, event_types: list[type], *ops: Callable):
         def _type_filter( e:Event ):
@@ -165,6 +178,9 @@ class EventBus:
         event_type: type,
         on_next: Callable[[Event], Awaitable[None]]):
         return self.subscribe_types([event_type], on_next)
+
+    def iter(self, *ops) -> LazyIterSubscription:
+        return LazyIterSubscription(self.observe(*ops))
 
     def iter_type(self, event_type: type, *ops: Callable) -> LazyIterSubscription:
         return LazyIterSubscription(self.observe_type(event_type, *ops))

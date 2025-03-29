@@ -6,6 +6,8 @@ import ipaddress
 
 import logging
 
+from netlab.eventbus import EventBus
+
 from .atm import AsyncTaskManager
 
 log = logging.getLogger("NU")
@@ -30,12 +32,16 @@ class NetworkUtilities:
     FOr other things, there's setuid
     """
 
-    def __init__(self, netns: Optional[str] = None):
+    def __init__(self, netns: Optional[str] = None, eventbus: EventBus|None=None):
         self.netns = netns
+        if eventbus:
+            self.eventbus = eventbus.child(f"netutils")
+        else:
+            self.eventbus = EventBus(name=f"netutils")
 
     async def _run_command(self, command: List[str]):
         log.debug(f"[{self.netns}] {command}")
-        task = await AsyncTaskManager(args=command, netns=self.netns)
+        task = await AsyncTaskManager(args=command, netns=self.netns, eventbus=self.eventbus)
         if task.return_code:
             #for loge in task.get_recent_logs(20):
             #    print(loge.message)
