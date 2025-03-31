@@ -1,13 +1,16 @@
 import asyncio
 import uuid
 from time import time
-from typing import Any, Callable, Optional, List, Literal, TypeVar, Generic, Awaitable
+from typing import Any, Callable, Optional, List, Literal, Type, TypeVar, Generic, Awaitable
 
 from pydantic import BaseModel, Field
 import aioreactive as rx
 from aioreactive import AsyncDisposable, AsyncObservable, AsyncSubject, AsyncIteratorObserver, subscription
-import aioreactive as rx
 from expression.core import pipe
+from aioreactive import AsyncIteratorObserver, AsyncObservable
+from typing import AsyncIterator, TypeVar, Generic
+
+from .rxutils import LazyIterSubscription
 
 # --- Constants ---
 
@@ -17,12 +20,12 @@ NULL_GUID = "00000000-0000-0000-0000-000000000000"
 # --- Models ---
 
 class Event(BaseModel, Generic[T]):
-    guid: str                  # Emitter GUID (source of the event)
+    timestamp: float = Field(default_factory=time)
     name: str
     path: str           # Path in bus
-    data: T            # Typed payload
     evtype: str
-    timestamp: float = Field(default_factory=time)
+    data: T            # Typed payload
+    guid: str                  # Emitter GUID (source of the event)
 
     def render(self) -> str:
         return self.data.model_dump_json()
@@ -30,7 +33,7 @@ class Event(BaseModel, Generic[T]):
 class SimpleMessage(BaseModel):
     message: str
     data: Any|None = None
-    
+
 system_message_type = Literal[
         "BusCreated",
         "BusRemoved",
@@ -59,25 +62,14 @@ async def subscribe(
     observer = rx.AsyncAnonymousObserver(asend=on_next, athrow=on_error, aclose=on_completed)
     return await observable.subscribe_async(observer)
 
-from aioreactive import AsyncIteratorObserver, AsyncObservable
-from typing import AsyncIterator, TypeVar, Generic
+def event_to_json( ev: Event ) -> str:
+    return ev.model_dump_json()
 
-_T = TypeVar("_T")
-
-class LazyIterSubscription(Generic[_T]):
-    def __init__(self, source: AsyncObservable[_T]):
-        self._observer = AsyncIteratorObserver(source)
-
-    async def __aenter__(self) -> AsyncIterator[_T]:
-        # triggers lazy subscription on first iteration
-        return self._observer
-
-    async def __aexit__(self, *args):
-        await self._observer.dispose_async()
-
-    def __aiter__(self) -> AsyncIterator[_T]:
-        return self._observer
-
+FT = TypeVar("FT")
+def filter_type(typ: Type[FT], predicate: Callable[[FT], bool]):
+    def _filter( ev: Event ):
+        return isinstance(ev.data, typ) and predicate(ev.data)
+    return rx.filter( _filter )
 
 # --- EventBus ---
 
@@ -99,7 +91,7 @@ class EventBus:
         asyncio.ensure_future(self._emit_system("BusCreated"))
 
         if parent:
-            psub = self.subscribe( self._push_to_parent ) 
+            psub = self.subscribe( self._push_to_parent )
             asyncio.ensure_future(psub)
         else:
             self._parent_subs = None
@@ -152,7 +144,7 @@ class EventBus:
 
     def observe(self, *ops: Callable) -> rx.AsyncObservable:
         """
-        Convenience 
+        Convenience
         """
         takeu = rx.take_until( self._destroyed )
         return pipe(self._subject, takeu, *ops)

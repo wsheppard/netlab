@@ -105,6 +105,7 @@ class BGTasksMixin:
         return
 
 
+# TODO: Add checker for 'system' python i.e. in /usr
 class PythonBinaryChecker:
     """
     I don't like running as root.
@@ -114,6 +115,8 @@ class PythonBinaryChecker:
     This class will check if the caller has all the permissions required to run the netlab
     utilities
     """
+
+    
 
     # To ensure only the user has access to python 
     REQUIRED_FILE_MODE = 0o700

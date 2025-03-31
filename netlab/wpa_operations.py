@@ -304,17 +304,6 @@ class WpaOperations:
         # Enable the network (no config saving)
         await self.wpa_ctrl.request(f"ENABLE_NETWORK {network_id}")
 
-    async def wait_for_connection(self):
-        # Wait for connection event
-        connected = await self.wait_for_event("CONNECTED")
-        if connected:
-            log.debug(f"[{self.interface}] WPA_Supplicant connected!")
-        else:
-            await self.disconnect()
-            raise FailedToConnect(
-                    f"[{self.interface}] Failed to connect in 30 secs")
-        return True
-
     async def disconnect(self):
         """Disconnect and remove the network configuration."""
         if self.connected_network_id is not None:
@@ -467,7 +456,12 @@ class WifiClient:
 
     async def connect_and_dhcp(self, config: NetworkConfig):
         await self.connect(config)
-        await self.ops.wait_for_connection()
+
+        try: 
+            await self.ops.wait_for_event("CONNECTED")
+        except asyncio.TimeoutError:
+            raise FailedToConnect
+
         await self.start_dhcp()
         await self.wait_for_bind()
         return self
