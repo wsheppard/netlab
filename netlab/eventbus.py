@@ -75,9 +75,10 @@ def system_event():
     return guid_filter(NULL_GUID)
 
 # --- Maps ----
-
-def event_to_json( ev: Event ) -> str:
-    return ev.model_dump_json()
+def event_to_json():
+    def _event_to_json( ev: Event ) -> str:
+        return ev.model_dump_json()
+    return rx.map( _event_to_json )
 
 FT = TypeVar("FT")
 def filter_type(typ: Type[FT], predicate: Callable[[FT], bool]):
@@ -157,6 +158,13 @@ class EventBus:
     async def _emit_system(self, type_: system_message_type):
         await self.emit(SystemMessage(type=type_, bus=self.guid, name=self.name), guid=NULL_GUID)
 
+    def observe_destroyed(self) -> rx.AsyncObservable:
+        """
+        Return this which will only ever emit when the bus is finished - allows lifcycle
+        management outside of the bus.
+        """
+        return pipe( self._destroyed, rx.take(1) )
+
     def observe(self, *ops: Callable) -> rx.AsyncObservable:
         """
         The base observer pipe which includes the cleanup mechanism.
@@ -169,7 +177,7 @@ class EventBus:
         Filter on the payload type
         """
         return self.observe(types_filter(event_types), *ops)
-    
+
     def observe_guid(self, guid: uuid.UUID, *ops: Callable):
         """
         Filter on guid
