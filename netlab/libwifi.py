@@ -14,7 +14,6 @@ from . import netutils
 from .iwlist import IWList
 
 
-
 class IWParse(dict):
     def __init__(self, namespace=None):
         self.namespace = namespace
@@ -60,7 +59,6 @@ class WifiInterface(dict):
             print("Couldnt update data with provided data - ")
             print(data)
 
-
     def __repr__(self):
         nsfield = f", ns={self.namespace}" if self.namespace else ""
         return f'Wifii({self.interface}{nsfield})'
@@ -105,16 +103,19 @@ class WifiInterface(dict):
         return 2412 in self.get_freqs()
 
     async def summary(self):
-        return { 
-               'iface': self.interface, 
-               'driver': self.get('network_driver'),
-               'desc': self.get('desc'),
-               'state': await self.state(),
-               'iftype': self['iftype'],
-               '5g': 5180 in self.get_freqs(),
-               '2g': 2412 in self.get_freqs(),
-               #'freqs': ",".join( map(str,wifii['wiphy']['freqs']) )
-               }
+        return {
+            "iface": self.interface,
+            "ns": self.namespace,
+            "driver": self.get("network_driver"),
+            "desc": self.get("desc"),
+            "state": await self.state(),
+            "iftype": self["iftype"],
+            "5g": 5180 in self.get_freqs(),
+            "2g": 2412 in self.get_freqs(),
+
+            # Quite a lot of data..
+            #'freqs': ",".join( map(str,wifii['wiphy']['freqs']) )
+        }
 
     def disabled_freqs(self):
         wiphy = self['wiphy']
@@ -133,5 +134,3 @@ class WifiInterface(dict):
     def get_freq(self,freq):
         freqs = self['wiphy']['freqs']
         return freqs[freq]
-
-

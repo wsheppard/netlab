@@ -133,7 +133,7 @@ class AsyncTaskManager(BGTasksMixin):
             # Important points,
             # We don't like ttys because they're weird.
             # If we run it like this, it behaves just like anything else.
-            cmd = ["ssh", "-T", self.ssh] + cmd
+            cmd = ["ssh", "-T", "-o", "PasswordAuthentication=no", self.ssh] + cmd
 
         self.log.debug(f"Starting process: {cmd}")
 

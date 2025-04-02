@@ -393,8 +393,10 @@ class WifiClient:
         """
         if e.event_type=="CONNECTED":
             self.apmac = e.details['mac']
+            await self.send_bus(f"Connected to AP:",data=self.wcstate())
         elif e.event_type=="DISCONNECTED":
             self.apmac = None
+            await self.send_bus(f"Disconnected:",data=e)
 
     @property
     def setup_done(self):

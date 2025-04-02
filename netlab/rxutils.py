@@ -3,7 +3,7 @@ import zstandard as zstd
 import asyncio
 from pathlib import Path
 from aioreactive import AsyncIteratorObserver, AsyncObservable
-from typing import AsyncIterator, TypeVar, Generic
+from typing import AsyncIterator, Awaitable, Callable, TypeVar, Generic
 
 from aioreactive.subject import AsyncSubject
 from typing import Any
@@ -14,6 +14,20 @@ from typing import Generic, TypeVar, Optional
 
 _T = TypeVar("_T")
 
+# Use this to subscribe an async callback to any observable
+async def subscribe(
+    observable: AsyncObservable,
+    on_next: Callable[[Any], Awaitable[None]],
+    on_error: Optional[Callable[[Exception], Awaitable[None]]] = None,
+    on_completed: Optional[Callable[[], Awaitable[None]]] = None,
+) -> AsyncDisposable:
+    """
+    A utility to subscribe to an observable
+    """
+    observer = rx.AsyncAnonymousObserver(asend=on_next, athrow=on_error, aclose=on_completed)
+    return await observable.subscribe_async(observer)
+
+# Use this to get an async context manager AND iterable for any observable:
 class LazyIterSubscription(Generic[_T]):
     def __init__(self, source: AsyncObservable[_T]):
         self._observer = AsyncIteratorObserver(source)
