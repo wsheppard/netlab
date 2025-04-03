@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 from typing import Optional, Tuple
 from typing import Optional
+from uuid import uuid4
 import weakref
 
 from pydantic import BaseModel
@@ -21,19 +22,20 @@ class WpaBaseSocket(BGTasksMixin):
     """
     Basic Unix DGRAM socket with async queue support.
     """
-    _counter = 0
 
-    def __init__(self, path=None):
-        WpaBaseSocket._counter += 1
-        self.path = Path(path or "/run/wpa_supplicant/wlan0")
-        self.local_path = f"/tmp/wpa_ctrl_{os.getpid()}_{WpaBaseSocket._counter}"
+    def __init__(self, path):
+        self.path = Path(path)
+        ranid = uuid4()
+        self.local_path = Path(f"/tmp/netlab/wpa_ctrl_{ranid}")
         self.bgtasks = set()
         self.sock = None
         self.queue = asyncio.Queue()
         self._reader_task = None
         self._started = False
 
+
     async def start(self):
+        self.local_path.parent.mkdir(parents=True, exist_ok=True)
         if self._started:
             return
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -52,7 +54,7 @@ class WpaBaseSocket(BGTasksMixin):
             raise RuntimeError(f"Socket {self.path} never appeared")
 
         try:
-            self.sock.bind(self.local_path)
+            self.sock.bind(str(self.local_path))
             await loop.sock_connect(self.sock, str(self.path))
         except:
             self._cleanup()

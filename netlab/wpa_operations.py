@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Literal, Optional, Sequence, TypeAlias
 import json
 
@@ -191,7 +192,7 @@ class WpaOperations:
     No configurations are saved; all settings are temporary.
     """
 
-    def __init__(self, interface: str = "wlan0", eventbus: Optional[EventBus]=None):
+    def __init__(self, interface, eventbus: Optional[EventBus]=None):
         self.interface = interface
         self.connected_network_id: Optional[int] = None
 
@@ -347,8 +348,8 @@ class WifiClient:
     def __init__(self, interface, netns=None, eventbus:Optional[EventBus]=None):
         self.interface = interface
         self.netns = netns if netns else interface
-        self.config_path = f"/tmp/{self.interface}_wpasup.conf"
-        self.ctrl_interface = "/var/run/wpa_supplicant"
+        self.config_path = Path(f"/tmp/netlab/{self.interface}_wpasup.conf")
+        self.ctrl_interface = Path("/var/run/wpa_supplicant")
 
         if eventbus:
             self.eventbus = eventbus.child(f"wificlient-{interface}")
@@ -406,7 +407,6 @@ class WifiClient:
         """
         Start supplicant, operations and clear dhcp
         """
-        await self.send_bus("Subscibing to events...")
         await self.ops.subscribe_events( "CONNECTED DISCONNECTED".split(), self._events_cb)
 
         if not self._setup_done.is_set():
@@ -419,6 +419,7 @@ class WifiClient:
             self._setup_done.set()
 
     def _generate_wpa_supplicant_config(self):
+        self.config_path.parent.mkdir(parents=True,exist_ok=True)
         with open(self.config_path, 'w') as conf_file:
             conf_file.write(f"ctrl_interface=DIR={self.ctrl_interface} GROUP=netdev\n")
             if self.mac_addr_randomization:

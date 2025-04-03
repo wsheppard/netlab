@@ -28,7 +28,7 @@ class DHCPManager(BGTasksMixin):
 
     log = logging.getLogger("DHCPM")
 
-    WORK_DIR = Path("/tmp/dhcpmanager")
+    WORK_DIR = Path("/tmp/netlab/dhcpmanager")
 
     INCLUDE_KEYS = [ 
                     "reason", "interface", "new_ip_address",
