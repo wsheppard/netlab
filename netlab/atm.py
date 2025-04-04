@@ -174,7 +174,8 @@ class AsyncTaskManager(BGTasksMixin):
             await self.send_bus(f"Started")
             await self.process.wait()
         except asyncio.CancelledError:
-            self.log.warning(f"Cancellation in ATM monitor: {self}")
+            self.log.debug(f"Cancellation in ATM monitor: {self}")
+            await self.send_bus("Cancelled", str(self))
         else:
             self._process_stopped.set()
             await self.send_bus("Stopped", str(self))

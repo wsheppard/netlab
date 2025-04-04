@@ -114,13 +114,14 @@ async def logtofile(obs: rx.AsyncObservable[str], path:Path):
     """
     A helper to push any observable out to a compressed file
     This uses internal buffering, and the context manager to flush.
+    We add a newline automatically so bear that in mind!
 
     So you would usually run this in a task
     """
     zpath = path.with_name( path.name + ".zstd" )
     async with AsyncZstdLogWriter(zpath) as log, LazyIterSubscription(obs) as chunks:
             async for chunk in chunks:
-                await log.write(chunk.encode())
+                await log.write((chunk+"\n").encode())
 
 
 

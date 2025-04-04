@@ -21,11 +21,15 @@ log = logging.getLogger("BaseSocket")
 class WpaBaseSocket(BGTasksMixin):
     """
     Basic Unix DGRAM socket with async queue support.
+
+    This takes the path of the supplicant socket i.e. /var/wpa_supplicant/wlan0
     """
 
     def __init__(self, path):
         self.path = Path(path)
         ranid = uuid4()
+
+        # This is the return socket
         self.local_path = Path(f"/tmp/netlab/wpa_ctrl_{ranid}")
         self.bgtasks = set()
         self.sock = None
@@ -57,7 +61,6 @@ class WpaBaseSocket(BGTasksMixin):
             self.sock.bind(str(self.local_path))
             await loop.sock_connect(self.sock, str(self.path))
         except Exception:
-            self._cleanup()
             raise
         self._reader_task = self.bgadd(self._read_loop())
         self._started = True
@@ -72,7 +75,9 @@ class WpaBaseSocket(BGTasksMixin):
                     break
                 await self.queue.put(data)
             except (asyncio.CancelledError, OSError):
-                self._cleanup()
+                break
+
+        await self.close()
 
     async def send_raw(self, data: bytes):
         loop = asyncio.get_running_loop()

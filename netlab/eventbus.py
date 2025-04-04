@@ -48,7 +48,8 @@ class SystemMessage(BaseModel):
 
 # --- Utility Observers ----
 async def printer(e:Event):
-    print(e.model_dump_json())
+    print(e)
+    # print(e.model_dump_json())
 
 # --- Filters ---
 # Call these to get rx pipeline entries

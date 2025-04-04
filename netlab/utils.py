@@ -21,9 +21,10 @@ class BGTasksMixin:
     bgtasks: set|None = None
     # You should call bgcleanup somewhere otherwise these tasks will be
     # around forever!!
+    bglog: logging.Logger|None = None
 
     def bgtask_complete(self, task):
-        log = getattr(self, "log", None) or logging.getLogger("bgtasks")
+        log = self.bglog or logging.getLogger("bgtasks")
         name = task.get_name()
         try:
             result = task.result()
@@ -50,7 +51,7 @@ class BGTasksMixin:
         return tsk
 
     def bgcleanup(self):
-        log = getattr(self, "log") or logging.getLogger("bgtasks")
+        log = self.bglog or logging.getLogger("bgtasks")
         if not self.bgtasks:
             return
         for task in self.bgtasks:
@@ -66,7 +67,7 @@ class BGTasksMixin:
         This ensures that when a master task decides to cancel the rest, it properly waits
         for cleanup before returning.
         """
-        log = getattr(self, "log", None) or logging.getLogger("bgtasks")
+        log = self.bglog or logging.getLogger("bgtasks")
         current = asyncio.current_task()
         tasks_to_cancel = {task for task in self.bgtasks if task is not current}
         if not tasks_to_cancel:
@@ -82,7 +83,7 @@ class BGTasksMixin:
 
 
     async def bgwait(self):
-        log = getattr(self, "log", None) or logging.getLogger("bgtasks")
+        log = self.bglog or logging.getLogger("bgtasks")
         log.debug("Waiting on completion...")
         if not self.bgtasks:
             log.debug("No tasks to wait on, early exit")

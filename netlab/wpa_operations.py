@@ -403,13 +403,14 @@ class WifiClient:
     def setup_done(self):
         return self._setup_done.is_set()
 
+
     async def setup(self):
         """
         Start supplicant, operations and clear dhcp
         """
-        await self.ops.subscribe_events( "CONNECTED DISCONNECTED".split(), self._events_cb)
-
         if not self._setup_done.is_set():
+            await self.send_bus("Setting up wifi client....")
+            await self.ops.subscribe_events( "CONNECTED DISCONNECTED".split(), self._events_cb)
             # The mac _probably_ won't change. So should be ok
             self.mac = await self.get_mac()
 
