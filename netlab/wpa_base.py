@@ -56,7 +56,7 @@ class WpaBaseSocket(BGTasksMixin):
         try:
             self.sock.bind(str(self.local_path))
             await loop.sock_connect(self.sock, str(self.path))
-        except:
+        except Exception:
             self._cleanup()
             raise
         self._reader_task = self.bgadd(self._read_loop())
@@ -72,7 +72,7 @@ class WpaBaseSocket(BGTasksMixin):
                     break
                 await self.queue.put(data)
             except (asyncio.CancelledError, OSError):
-                break
+                self._cleanup()
 
     async def send_raw(self, data: bytes):
         loop = asyncio.get_running_loop()
@@ -88,8 +88,8 @@ class WpaBaseSocket(BGTasksMixin):
     def _cleanup(self):
         if self.sock:
             self.sock.close()
-        if os.path.exists(self.local_path):
-            os.unlink(self.local_path)
+        if self.local_path.exists():
+            self.local_path.unlink()
 
 
 class WpaEvent(BaseModel):
