@@ -51,6 +51,7 @@ class AsyncTaskManager(BGTasksMixin):
                  check_time: int = 0,
                  ssh: Optional[str] = None,
                  env: dict|None = None,
+                 name: str|None = None,
                  netns: Optional[str] = None,
                  eventbus: Optional[EventBus] = None):
         self.args = args
@@ -63,10 +64,12 @@ class AsyncTaskManager(BGTasksMixin):
         self.bgtasks = set()
         self.env = env
 
+        self.name = name or f"atm-{args[0]}"
+
         if eventbus:
-            self.eventbus = eventbus.child(f"atm-{args[0]}")
+            self.eventbus = eventbus.child(name)
         else:
-            self.eventbus = EventBus(f"atm-{args[0]}")
+            self.eventbus = EventBus(name)
         self.process: Optional[asyncio.subprocess.Process] = None
 
         self._log_q: asyncio.Queue[LogEvent] = asyncio.Queue()

@@ -368,6 +368,7 @@ class WifiClient:
         # This doesn't start it
         self.supplicant = AsyncTaskManager(
                 self.wpa_args,
+                name=f"supplicant-{self.interface}",
                 netns=self.netns,
                 check_time=3,
                 eventbus=self.eventbus
