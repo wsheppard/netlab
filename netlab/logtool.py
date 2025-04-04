@@ -7,6 +7,7 @@ import zstandard as zstd
 
 from typing import Any
 from netlab.eventbus import Event
+import hashlib
 
 # Whoosh imports
 from whoosh.index import create_in, open_dir
@@ -15,17 +16,14 @@ from whoosh.qparser import QueryParser
 from whoosh.query import Term, Not, And, Wildcard, NumericRange
 
 from rich.console import Console
-import hashlib
 
 console = Console()
 colors = ["red", "green", "blue", "cyan", "magenta", "yellow", "white", "bright_black"]
 
 
-
 def guid_to_color(guid):
     h = hashlib.md5(guid.encode()).hexdigest()
     return colors[int(h, 16) % len(colors)]
-
 
 def read_zst_lines(path):
     with open(path, 'rb') as fh:
@@ -46,10 +44,46 @@ def read_zst_lines(path):
 schema = Schema(
     guid=ID(stored=True),
     name=TEXT(stored=True),
-    evtype=TEXT(stored=True),
+    evtype=ID(stored=True),
     data=TEXT(stored=True),
     timestamp=NUMERIC(numtype=float, stored=True)
 )
+
+from collections import Counter, defaultdict
+
+
+def evtypes(zst_path: str) -> None:
+    ix = open_existing_index(zst_path)
+    with ix.searcher() as searcher:
+        counter = Counter()
+        for hit in searcher.documents():
+            evtype = hit.get("evtype", "")
+            counter[evtype] += 1
+
+        print(f"{'EvType':<30}  {'Count':>5}")
+        print("-" * 40)
+        for evtype, count in counter.most_common():
+            print(f"{evtype:<30}  {count:>5}")
+
+
+def guids(zst_path: str) -> None:
+    ix = open_existing_index(zst_path)
+    with ix.searcher() as searcher:
+        counter = Counter()
+        names = defaultdict(str)
+        for hit in searcher.documents():
+            guid = hit["guid"]
+            name = hit.get("name", "")
+            if str(name) == str(guid):
+                name = ""
+            counter[guid] += 1
+            if not names[guid]:
+                names[guid] = name
+
+        print(f"{'GUID':<36}  {'Count':>5}  Name")
+        print("-" * 60)
+        for guid, count in counter.most_common():
+            print(f"{guid:<36}  {count:>5}  {names[guid]}")
 
 def get_index_path(zst_path: str) -> str:
     hashed = hashlib.md5(zst_path.encode('utf-8')).hexdigest()
@@ -57,6 +91,7 @@ def get_index_path(zst_path: str) -> str:
 
 def build_index(zst_path: str) -> None:
     index_path = get_index_path(zst_path)
+    print(f"Building index {index_path}")
     new_index = False
     if not os.path.exists(index_path) or not os.listdir(index_path):
         os.makedirs(index_path, exist_ok=True)
@@ -96,9 +131,8 @@ def build_index(zst_path: str) -> None:
 def open_existing_index(zst_path: str):
     index_path = get_index_path(zst_path)
     if not os.path.exists(index_path) or not os.listdir(index_path):
-        print(f"No existing index at {index_path}.")
-        sys.exit(1)
-    print(f"Using existing index at {index_path}")
+        build_index(zst_path)
+    print(f"Using index at {index_path}")
     return open_dir(index_path)
 
 def build_field_filters(filters, field):
@@ -112,42 +146,54 @@ def build_field_filters(filters, field):
         queries.append(Not(q) if neg else q)
     return queries
 
-def search_by_term(zst_path: str, query_str: str, guid_filters, name_filters) -> None:
+def print_hits(hits):
+    for hit in sorted(hits, key=lambda h: float(h["timestamp"])):
+        color = guid_to_color(hit["guid"])
+        line = (
+            f"[{int(hit['timestamp'])}] "
+            f"{hit['name']}|{hit['evtype']} "
+            f"{hit['data']}"
+        )
+        console.print(line, style=color, highlight=False)
+
+
+
+
+def search_by_term(zst_path: str, query_str: str, guid_filters, name_filters, evtype_filters) -> None:
     ix = open_existing_index(zst_path)
     with ix.searcher() as searcher:
-        parser = QueryParser("data", schema=ix.schema)
-        base_query = parser.parse(query_str)
-        filters = build_field_filters(guid_filters, "guid") + build_field_filters(name_filters, "name")
-        full_query = And([base_query] + filters) if filters else base_query
-        results = searcher.search(full_query, limit=None)
-        print(f"Found {len(results)} results for query '{query_str}'")
-        for hit in sorted(results, key=lambda h: float(h["timestamp"])):
-            color = guid_to_color(hit["guid"])
-            line = (
-                f"timestamp={hit['timestamp']} "
-                f"name={hit['name']} "
-                f"{hit['data']}"
-            )
-            console.print(line, style=color, highlight=False)
+        query_parts = []
 
-def search_around_timestamp(zst_path: str, around_ts: float, window: float, guid_filters, name_filters) -> None:
+        if query_str:
+            parser = QueryParser("data", schema=ix.schema)
+            query_parts.append(parser.parse(query_str))
+
+        query_parts += (
+            build_field_filters(guid_filters, "guid") +
+            build_field_filters(name_filters, "name") +
+            build_field_filters(evtype_filters, "evtype")
+        )
+
+        full_query = And(query_parts) if query_parts else None
+        results = searcher.search(full_query, limit=None) if full_query else searcher.documents()
+        print(f"Found {len(results)} results")
+        print_hits(results)
+
+def search_around_timestamp(zst_path: str, around_ts: float, window: float, guid_filters, name_filters, evtype_filters) -> None:
     ix = open_existing_index(zst_path)
     lower = around_ts - window
     upper = around_ts + window
     with ix.searcher() as searcher:
         base_query = NumericRange("timestamp", lower, upper, startexcl=False, endexcl=False)
-        filters = build_field_filters(guid_filters, "guid") + build_field_filters(name_filters, "name")
+        filters = (
+            build_field_filters(guid_filters, "guid") +
+            build_field_filters(name_filters, "name") +
+            build_field_filters(evtype_filters, "evtype")
+        )
         full_query = And([base_query] + filters) if filters else base_query
         results = searcher.search(full_query, limit=None)
         print(f"Found {len(results)} results for timestamp range [{lower}, {upper}]")
-        for hit in sorted(results, key=lambda h: float(h["timestamp"])):
-            color = guid_to_color(hit["guid"])
-            line = (
-                f"timestamp={hit['timestamp']} "
-                f"name={hit['name']} "
-                f"{hit['data']}"
-            )
-            console.print(line, style=color, highlight=False)
+        print_hits(results)
 
 def main():
     parser = argparse.ArgumentParser(description="LogTool with Whoosh integration.")
@@ -157,19 +203,38 @@ def main():
     parser.add_argument('--window', type=float, default=5.0, help="Window in seconds for --around-ts.")
     parser.add_argument('--guid', action='append', help="Filter by guid (supports *, ! for negation)")
     parser.add_argument('--name', action='append', help="Filter by name (supports *, ! for negation)")
+    parser.add_argument('--evtype', action='append', help="Filter by evtype (supports *, ! for negation)")
     parser.add_argument('zst_file', help="Path to .zst JSONL log file")
+    parser.add_argument('--guids', action='store_true', help="Show unique GUIDs with count and name.")
+    parser.add_argument('--evtypes', action='store_true', help="Show unique evtypes with count.")
+
+
     args = parser.parse_args()
 
-    if args.build:
-        build_index(args.zst_file)
-        return
-
-    if args.term:
-        search_by_term(args.zst_file, args.term, args.guid, args.name)
+    if args.guids:
+        guids(args.zst_file)
+    elif args.evtypes:
+        evtypes(args.zst_file)
+    elif args.term or args.guid or args.name or args.evtype:
+        search_by_term(
+            args.zst_file,
+            args.term,  # this can be None
+            args.guid,
+            args.name,
+            args.evtype
+        )
     elif args.around_ts is not None:
-        search_around_timestamp(args.zst_file, args.around_ts, args.window, args.guid, args.name)
+        search_around_timestamp(
+            args.zst_file,
+            args.around_ts,
+            args.window,
+            args.guid,
+            args.name,
+            args.evtype
+        )
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
