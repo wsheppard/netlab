@@ -135,16 +135,30 @@ def open_existing_index(zst_path: str):
     print(f"Using index at {index_path}")
     return open_dir(index_path)
 
+
+from whoosh.query import Or
+
 def build_field_filters(filters, field):
     if not filters:
         return []
-    queries = []
+    include = []
+    exclude = []
     for f in filters:
-        neg = f.startswith("!")
-        pat = f[1:] if neg else f
-        q = Wildcard(field, pat) if "*" in pat else Term(field, pat)
-        queries.append(Not(q) if neg else q)
-    return queries
+        if f.startswith("^"):
+            pat = f[1:]
+            q = Wildcard(field, pat) if "*" in pat else Term(field, pat)
+            exclude.append(q)
+        else:
+            q = Wildcard(field, f) if "*" in f else Term(field, f)
+            include.append(q)
+
+    result = []
+    if include:
+        result.append(Or(include) if len(include) > 1 else include[0])
+    for q in exclude:
+        result.append(Not(q))
+    return result
+
 
 def print_hits(hits):
     for hit in sorted(hits, key=lambda h: float(h["timestamp"])):

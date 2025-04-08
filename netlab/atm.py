@@ -238,7 +238,9 @@ class AsyncTaskManager(BGTasksMixin):
                             await asyncio.wait_for(self.process.wait(), timeout=self.stop_grace_period)
                         except asyncio.TimeoutError:
                             if n == 0:
-                                self.log.warning("Process did not terminate gracefully, forcing kill.")
+                                self.log.warning(f"Process did not terminate gracefully "
+                                                 f"after {self.stop_grace_period} secs, "
+                                                 f"forcing kill. {self}")
                                 self.process.kill()
                             else:
                                 self.log.error(f"Failed to kill process {self}")

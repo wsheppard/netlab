@@ -8,9 +8,26 @@ import logging
 
 from netlab.eventbus import EventBus
 
+import re
 from .atm import AsyncTaskManager
 
 log = logging.getLogger("NU")
+
+from pydantic import BaseModel
+
+class PingStats(BaseModel):
+    packets_transmitted: int
+    packets_received: int
+
+    # as percentage (e.g., 0.0, 100.0)
+    packet_loss: float  
+    
+    # in ms
+    rtt_min: float|None
+    rtt_avg: float|None
+    rtt_max: float|None
+    rtt_mdev: float|None
+
 
 class NUError(Exception):
     def __init__(self, message, task):
@@ -39,12 +56,11 @@ class NetworkUtilities:
         else:
             self.eventbus = EventBus(name=f"netutils")
 
-    async def _run_command(self, command: List[str]):
+    async def _run_command(self, command: List[str], raise_on_error=True) -> AsyncTaskManager:
         log.debug(f"[{self.netns}] {command}")
         task = await AsyncTaskManager(args=command, netns=self.netns, eventbus=self.eventbus)
-        if task.return_code:
-            #for loge in task.get_recent_logs(20):
-            #    print(loge.message)
+        if raise_on_error and task.return_code:
+            await self.eventbus.simple(f"Command failed {task}")
             raise NUError(f"Command failed [{command}]", task)
         return task
 
@@ -113,13 +129,12 @@ class NetworkUtilities:
         for cmd in commands:
             await self._run_command(cmd)
 
-    async def ping(self, host: str, count: int = 5) -> Dict[str, str]:
+    async def ping(self, host: str, count: int = 5) -> PingStats:
         try:
-            task = await self._run_command(["ping", "-c", str(count), host])
-            return self._parse_ping_output("\n".join( log.message for log in
-                                                 task.get_recent_logs() ))
+            task = await self._run_command(["ping", "-W","2", "-c", str(count), host])
+            return self._parse_ping_output("\n".join( task.get_str_logs() )) 
         except NUError as nue:
-            return { "res": nue.task.get_recent_logs() }
+            return self._parse_ping_output("\n".join( nue.task.get_str_logs() )) 
 
     async def randomize_mac_macchanger(self, interface: str):
         """
@@ -209,25 +224,28 @@ class NetworkUtilities:
     async def flush_routes(self, interface: str) -> None:
         await self.ipr("flush", "dev", interface)
 
-    def _parse_ping_output(self, output: str) -> Dict[str, str]:
+
+    def _parse_ping_output(self, output: str) -> PingStats:
         result = {}
         lines = output.strip().split("\n")
+
         for line in lines:
             if "packets transmitted" in line:
                 parts = line.split(",")
-                result["packets_transmitted"] = parts[0].split()[0]
-                result["packets_received"] = parts[1].split()[0]
-                result["packet_loss"] = parts[2].strip()
+                result["packets_transmitted"] = int(parts[0].split()[0])
+                result["packets_received"] = int(parts[1].split()[0])
+                result["packet_loss"] = float(parts[2].strip().split("%")[0])
             elif "rtt min/avg/max/mdev" in line:
-                values = line.split("=")[1].strip().split("/")
-                result["rtt_min"] = values[0] + " ms"
-                result["rtt_avg"] = values[1] + " ms"
-                result["rtt_max"] = values[2] + " ms"
-                result["rtt_mdev"] = values[3] + " ms"
-        return result
+                match = re.search(r"rtt min/avg/max/mdev = ([\d\.]+)/([\d\.]+)/([\d\.]+)/([\d\.]+)", line)
+                if match:
+                    result["rtt_min"] = float(match.group(1))
+                    result["rtt_avg"] = float(match.group(2))
+                    result["rtt_max"] = float(match.group(3))
+                    result["rtt_mdev"] = float(match.group(4))
+                else:
+                    raise ValueError(f"Unexpected rtt line format: {line}")
 
-
-
+        return PingStats(**result)
 
 
 

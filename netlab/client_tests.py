@@ -1,9 +1,20 @@
 import asyncio
 import logging
+from typing import Any
+
+from pydantic import BaseModel
 from netlab.eventbus import EventBus, SimpleMessage
 from netlab.utils import BGTasksMixin
-from netlab.wpa_operations import WifiClient
-from netlab import netutils
+from netlab.wpa_operations import WCState, WifiClient
+from netlab.netutils import PingStats
+
+class PingTestResult(BaseModel):
+    source: WCState
+    destination: WCState
+    forward: PingStats
+    reverse: PingStats|None
+    src_ext: PingStats
+    dst_ext: PingStats
 
 class WifiPingTester(BGTasksMixin):
 
@@ -22,7 +33,8 @@ class WifiPingTester(BGTasksMixin):
             self.eventbus = None
 
 
-    async def _ping_clients(self, client1:WifiClient, client2:WifiClient, do_reverse=False):
+    async def _ping_clients(self, client1:WifiClient, client2:WifiClient,
+                            do_reverse=False) -> PingTestResult:
         async with self.semaphore:
 
             #print(f"PING CLIENT: {client1} {client2}")
@@ -47,15 +59,17 @@ class WifiPingTester(BGTasksMixin):
                 if do_reverse:
                     reverse = await client1.ping(client2)
 
-            ping_info = {
+            ping_info = PingTestResult(**{
                          "source": client1.wcstate(),
                          "destination": client2.wcstate(),
                          "forward": forward,
                          "reverse": reverse,
                          "src_ext": src_ext,
                          "dst_ext": dst_ext,
-                         }
-
+                         })
+            
+            if self.eventbus:
+                await self.eventbus.emit(ping_info)
             return ping_info
 
     async def send_bus(self,msg):

@@ -56,6 +56,7 @@ async def printer(e:Event):
 # i.e. pipe( types_filter(), guid_filter() etc.. )
 
 
+
 def types_filter( event_types: list[type[BaseModel]] ):
     """
     Filter events by payload type
